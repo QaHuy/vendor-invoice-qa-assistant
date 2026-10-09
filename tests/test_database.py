@@ -411,3 +411,9 @@ def test_metrics_snapshot_counts_facts(db):
         "rejected": 0,
     }
     assert snapshot["average_original_confidence_bps"] == 10000
+
+
+def test_candidate_lookup_by_attempt(db):
+    candidate = make_candidate(db)
+    assert db.get_candidate_for_attempt(candidate.attempt_id) == candidate
+    assert db.get_candidate_for_attempt("missing") is None

@@ -318,6 +318,13 @@ class Database:
             ).fetchone()
         return _candidate_from_row(row) if row else None
 
+    def get_candidate_for_attempt(self, attempt_id: str) -> InvoiceCandidate | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM candidates WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+        return _candidate_from_row(row) if row else None
+
     def list_candidates(self, status: CandidateStatus | None = None) -> list[InvoiceCandidate]:
         query = "SELECT * FROM candidates"
         params: tuple[str, ...] = ()
