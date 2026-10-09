@@ -1,0 +1,25 @@
+# Secrets and local configuration
+.env
+.streamlit/secrets.toml
+
+# Runtime data
+.data/
+*.sqlite3
+*.db
+*.log
+uploads/
+*.tmp
+
+# Generated evidence
+sample_data/generated/
+.evaluation/
+
+# Python tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
