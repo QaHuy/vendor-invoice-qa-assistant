@@ -1,0 +1,442 @@
+{
+  "description": "Synthetic evaluation manifest. All organizations and identifiers are fictional.",
+  "validation_reference_date": "2026-10-10",
+  "fixtures": [
+    {
+      "id": "fx01-clean-usd",
+      "scenario": "clean_usd",
+      "lines": [
+        "Vendor Name: Example Demo Office Supplies Ltd.",
+        "Vendor Tax ID: DEMO-TAX-1001",
+        "Invoice Number: INV-DEMO-0001",
+        "Invoice Date: 2026-09-30",
+        "Currency: USD",
+        "Subtotal: 1,000.00",
+        "Tax Amount: 80.00",
+        "Total Amount: 1,080.00",
+        "PO Reference: PO-DEMO-001"
+      ],
+      "expected": {
+        "status": "auto_ready",
+        "issue_codes": [],
+        "overall_confidence_bps": 10000,
+        "normalized": {
+          "vendor_name": "Example Demo Office Supplies Ltd.",
+          "vendor_tax_id": "DEMO-TAX-1001",
+          "invoice_number": "INV-DEMO-0001",
+          "invoice_date": "2026-09-30",
+          "currency": "USD",
+          "subtotal": "1000.00",
+          "tax_amount": "80.00",
+          "total_amount": "1080.00",
+          "po_reference": "PO-DEMO-001"
+        },
+        "duplicate": null
+      }
+    },
+    {
+      "id": "fx02-clean-vnd",
+      "scenario": "clean_vnd",
+      "lines": [
+        "Vendor Name: Example Demo Trading Co.",
+        "Vendor Tax ID: DEMO-TAX-1002",
+        "Invoice Number: INV-DEMO-0002",
+        "Invoice Date: 2026-09-29",
+        "Currency: VND",
+        "Subtotal: 25,000,000",
+        "Tax Amount: 2,000,000",
+        "Total Amount: 27,000,000",
+        "PO Reference: PO-DEMO-002"
+      ],
+      "expected": {
+        "status": "auto_ready",
+        "issue_codes": [],
+        "overall_confidence_bps": 10000,
+        "normalized": {
+          "vendor_name": "Example Demo Trading Co.",
+          "vendor_tax_id": "DEMO-TAX-1002",
+          "invoice_number": "INV-DEMO-0002",
+          "invoice_date": "2026-09-29",
+          "currency": "VND",
+          "subtotal": "25000000",
+          "tax_amount": "2000000",
+          "total_amount": "27000000",
+          "po_reference": "PO-DEMO-002"
+        },
+        "duplicate": null
+      }
+    },
+    {
+      "id": "fx03-clean-no-po",
+      "scenario": "clean_no_po",
+      "lines": [
+        "Vendor Name: Example Demo Logistics Ltd.",
+        "Vendor Tax ID: DEMO-TAX-1003",
+        "Invoice Number: INV-DEMO-0003",
+        "Invoice Date: 2026-09-28",
+        "Currency: EUR",
+        "Subtotal: 500.00",
+        "Tax Amount: 50.00",
+        "Total Amount: 550.00"
+      ],
+      "expected": {
+        "status": "auto_ready",
+        "issue_codes": [
+          "missing_po_reference"
+        ],
+        "overall_confidence_bps": 10000,
+        "normalized": {
+          "vendor_name": "Example Demo Logistics Ltd.",
+          "vendor_tax_id": "DEMO-TAX-1003",
+          "invoice_number": "INV-DEMO-0003",
+          "invoice_date": "2026-09-28",
+          "currency": "EUR",
+          "subtotal": "500.00",
+          "tax_amount": "50.00",
+          "total_amount": "550.00"
+        },
+        "duplicate": null
+      }
+    },
+    {
+      "id": "fx04-missing-invoice-number",
+      "scenario": "missing_invoice_number",
+      "lines": [
+        "Vendor Name: Example Demo Packaging Ltd.",
+        "Vendor Tax ID: DEMO-TAX-1004",
+        "Invoice Date: 2026-09-27",
+        "Currency: USD",
+        "Subtotal: 200.00",
+        "Tax Amount: 16.00",
+        "Total Amount: 216.00",
+        "PO Reference: PO-DEMO-004"
+      ],
+      "expected": {
+        "status": "review_required",
+        "issue_codes": [
+          "missing_required_field"
+        ],
+        "overall_confidence_bps": 8571,
+        "normalized": {
+          "vendor_name": "Example Demo Packaging Ltd.",
+          "vendor_tax_id": "DEMO-TAX-1004",
+          "invoice_date": "2026-09-27",
+          "currency": "USD",
+          "subtotal": "200.00",
+          "tax_amount": "16.00",
+          "total_amount": "216.00",
+          "po_reference": "PO-DEMO-004"
+        },
+        "duplicate": null
+      }
+    },
+    {
+      "id": "fx05-unsupported-currency",
+      "scenario": "unsupported_currency",
+      "lines": [
+        "Vendor Name: Example Demo Textiles Ltd.",
+        "Vendor Tax ID: DEMO-TAX-1005",
+        "Invoice Number: INV-DEMO-0005",
+        "Invoice Date: 2026-09-26",
+        "Currency: JPY",
+        "Subtotal: 300.00",
+        "Tax Amount: 30.00",
+        "Total Amount: 330.00",
+        "PO Reference: PO-DEMO-005"
+      ],
+      "expected": {
+        "status": "review_required",
+        "issue_codes": [
+          "unsupported_currency"
+        ],
+        "overall_confidence_bps": 10000,
+        "normalized": {
+          "vendor_name": "Example Demo Textiles Ltd.",
+          "vendor_tax_id": "DEMO-TAX-1005",
+          "invoice_number": "INV-DEMO-0005",
+          "invoice_date": "2026-09-26",
+          "subtotal": "300.00",
+          "tax_amount": "30.00",
+          "total_amount": "330.00",
+          "po_reference": "PO-DEMO-005"
+        },
+        "duplicate": null
+      }
+    },
+    {
+      "id": "fx06-malformed-amount",
+      "scenario": "malformed_amount",
+      "lines": [
+        "Vendor Name: Example Demo Hardware Ltd.",
+        "Vendor Tax ID: DEMO-TAX-1006",
+        "Invoice Number: INV-DEMO-0006",
+        "Invoice Date: 2026-09-25",
+        "Currency: USD",
+        "Subtotal: 1,0000",
+        "Tax Amount: 80.00",
+        "Total Amount: 1,080.00",
+        "PO Reference: PO-DEMO-006"
+      ],
+      "expected": {
+        "status": "review_required",
+        "issue_codes": [
+          "malformed_value"
+        ],
+        "overall_confidence_bps": 10000,
+        "normalized": {
+          "vendor_name": "Example Demo Hardware Ltd.",
+          "vendor_tax_id": "DEMO-TAX-1006",
+          "invoice_number": "INV-DEMO-0006",
+          "invoice_date": "2026-09-25",
+          "currency": "USD",
+          "tax_amount": "80.00",
+          "total_amount": "1080.00",
+          "po_reference": "PO-DEMO-006"
+        },
+        "duplicate": null
+      }
+    },
+    {
+      "id": "fx07-arithmetic-mismatch",
+      "scenario": "arithmetic_mismatch",
+      "lines": [
+        "Vendor Name: Example Demo Chemicals Ltd.",
+        "Vendor Tax ID: DEMO-TAX-1007",
+        "Invoice Number: INV-DEMO-0007",
+        "Invoice Date: 2026-09-24",
+        "Currency: GBP",
+        "Subtotal: 1,000.00",
+        "Tax Amount: 80.00",
+        "Total Amount: 1,081.00",
+        "PO Reference: PO-DEMO-007"
+      ],
+      "expected": {
+        "status": "review_required",
+        "issue_codes": [
+          "arithmetic_mismatch"
+        ],
+        "overall_confidence_bps": 10000,
+        "normalized": {
+          "vendor_name": "Example Demo Chemicals Ltd.",
+          "vendor_tax_id": "DEMO-TAX-1007",
+          "invoice_number": "INV-DEMO-0007",
+          "invoice_date": "2026-09-24",
+          "currency": "GBP",
+          "subtotal": "1000.00",
+          "tax_amount": "80.00",
+          "total_amount": "1081.00",
+          "po_reference": "PO-DEMO-007"
+        },
+        "duplicate": null
+      }
+    },
+    {
+      "id": "fx08-future-invoice-date",
+      "scenario": "future_invoice_date",
+      "lines": [
+        "Vendor Name: Example Demo Energy Ltd.",
+        "Vendor Tax ID: DEMO-TAX-1008",
+        "Invoice Number: INV-DEMO-0008",
+        "Invoice Date: 2026-10-11",
+        "Currency: SGD",
+        "Subtotal: 400.00",
+        "Tax Amount: 32.00",
+        "Total Amount: 432.00",
+        "PO Reference: PO-DEMO-008"
+      ],
+      "expected": {
+        "status": "review_required",
+        "issue_codes": [
+          "future_invoice_date"
+        ],
+        "overall_confidence_bps": 10000,
+        "normalized": {
+          "vendor_name": "Example Demo Energy Ltd.",
+          "vendor_tax_id": "DEMO-TAX-1008",
+          "invoice_number": "INV-DEMO-0008",
+          "invoice_date": "2026-10-11",
+          "currency": "SGD",
+          "subtotal": "400.00",
+          "tax_amount": "32.00",
+          "total_amount": "432.00",
+          "po_reference": "PO-DEMO-008"
+        },
+        "duplicate": null
+      }
+    },
+    {
+      "id": "fx09-low-confidence-alias",
+      "scenario": "low_confidence_alias",
+      "lines": [
+        "Vendor_Name: Example Demo Loose Ltd.",
+        "Vendor Tax ID: DEMO-TAX-1009",
+        "Invoice Number: INV-DEMO-0009",
+        "Invoice Date: 2026-09-23",
+        "Currency: USD",
+        "Subtotal: 100.00",
+        "Tax Amount: 8.00",
+        "Total Amount: 108.00",
+        "PO Reference: PO-DEMO-009"
+      ],
+      "expected": {
+        "status": "review_required",
+        "issue_codes": [
+          "low_field_confidence"
+        ],
+        "overall_confidence_bps": 9642,
+        "normalized": {
+          "vendor_name": "Example Demo Loose Ltd.",
+          "vendor_tax_id": "DEMO-TAX-1009",
+          "invoice_number": "INV-DEMO-0009",
+          "invoice_date": "2026-09-23",
+          "currency": "USD",
+          "subtotal": "100.00",
+          "tax_amount": "8.00",
+          "total_amount": "108.00",
+          "po_reference": "PO-DEMO-009"
+        },
+        "duplicate": null
+      }
+    },
+    {
+      "id": "fx10-conflicting-total",
+      "scenario": "conflicting_total",
+      "lines": [
+        "Vendor Name: Example Demo Furniture Ltd.",
+        "Vendor Tax ID: DEMO-TAX-1010",
+        "Invoice Number: INV-DEMO-0010",
+        "Invoice Date: 2026-09-22",
+        "Currency: USD",
+        "Subtotal: 1,000.00",
+        "Tax Amount: 80.00",
+        "Total Amount: 1,080.00",
+        "Total Amount: 1,090.00",
+        "PO Reference: PO-DEMO-010"
+      ],
+      "expected": {
+        "status": "review_required",
+        "issue_codes": [
+          "conflicting_values"
+        ],
+        "overall_confidence_bps": 8571,
+        "normalized": {
+          "vendor_name": "Example Demo Furniture Ltd.",
+          "vendor_tax_id": "DEMO-TAX-1010",
+          "invoice_number": "INV-DEMO-0010",
+          "invoice_date": "2026-09-22",
+          "currency": "USD",
+          "subtotal": "1000.00",
+          "tax_amount": "80.00",
+          "po_reference": "PO-DEMO-010"
+        },
+        "duplicate": null
+      }
+    },
+    {
+      "id": "fx11-content-duplicate",
+      "scenario": "content_duplicate",
+      "lines": [
+        "Vendor Name: Example Demo Office Supplies Ltd.",
+        "Vendor Tax ID: DEMO-TAX-1001",
+        "Invoice Number: INV-DEMO-0001",
+        "Invoice Date: 2026-09-30",
+        "Currency: USD",
+        "Subtotal: 1,000.00",
+        "Tax Amount: 80.00",
+        "Total Amount: 1,080.00",
+        "PO Reference: PO-DEMO-001"
+      ],
+      "expected": {
+        "status": "auto_ready",
+        "issue_codes": [],
+        "overall_confidence_bps": 10000,
+        "normalized": {
+          "vendor_name": "Example Demo Office Supplies Ltd.",
+          "vendor_tax_id": "DEMO-TAX-1001",
+          "invoice_number": "INV-DEMO-0001",
+          "invoice_date": "2026-09-30",
+          "currency": "USD",
+          "subtotal": "1000.00",
+          "tax_amount": "80.00",
+          "total_amount": "1080.00",
+          "po_reference": "PO-DEMO-001"
+        },
+        "duplicate": {
+          "of": "fx01-clean-usd",
+          "kind": "content"
+        }
+      }
+    },
+    {
+      "id": "fx12-logical-duplicate",
+      "scenario": "logical_duplicate",
+      "metadata_variant": "alternate",
+      "lines": [
+        "Vendor Name: Example Demo Office Supplies Ltd.",
+        "Vendor Tax ID: DEMO-TAX-1001",
+        "Invoice Number: INV-DEMO-0001",
+        "Invoice Date: 2026-09-30",
+        "Currency: USD",
+        "Subtotal: 1,000.00",
+        "Tax Amount: 80.00",
+        "Total Amount: 1,080.00",
+        "PO Reference: PO-DEMO-001"
+      ],
+      "expected": {
+        "status": "review_required",
+        "issue_codes": [
+          "possible_logical_duplicate"
+        ],
+        "overall_confidence_bps": 10000,
+        "normalized": {
+          "vendor_name": "Example Demo Office Supplies Ltd.",
+          "vendor_tax_id": "DEMO-TAX-1001",
+          "invoice_number": "INV-DEMO-0001",
+          "invoice_date": "2026-09-30",
+          "currency": "USD",
+          "subtotal": "1000.00",
+          "tax_amount": "80.00",
+          "total_amount": "1080.00",
+          "po_reference": "PO-DEMO-001"
+        },
+        "duplicate": {
+          "of": "fx01-clean-usd",
+          "kind": "logical"
+        }
+      }
+    },
+    {
+      "id": "fx13-excess-fraction-digits",
+      "scenario": "excess_fraction_digits",
+      "lines": [
+        "Vendor Name: Example Demo Foods Ltd.",
+        "Vendor Tax ID: DEMO-TAX-1013",
+        "Invoice Number: INV-DEMO-0013",
+        "Invoice Date: 2026-09-21",
+        "Currency: VND",
+        "Subtotal: 1,000.50",
+        "Tax Amount: 0",
+        "Total Amount: 1,000",
+        "PO Reference: PO-DEMO-013"
+      ],
+      "expected": {
+        "status": "review_required",
+        "issue_codes": [
+          "malformed_value"
+        ],
+        "overall_confidence_bps": 10000,
+        "normalized": {
+          "vendor_name": "Example Demo Foods Ltd.",
+          "vendor_tax_id": "DEMO-TAX-1013",
+          "invoice_number": "INV-DEMO-0013",
+          "invoice_date": "2026-09-21",
+          "currency": "VND",
+          "tax_amount": "0",
+          "total_amount": "1000",
+          "po_reference": "PO-DEMO-013"
+        },
+        "duplicate": null
+      }
+    }
+  ]
+}

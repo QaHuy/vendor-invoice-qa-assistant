@@ -38,3 +38,11 @@ def build_invoice_pdf(lines: list[str], *, metadata_variant: str = "canonical") 
     canvas.showPage()
     canvas.save()
     return buffer.getvalue()
+
+
+def fixture_pdf(fixture: dict) -> bytes:
+    """Build the PDF for one manifest fixture (lines plus optional metadata variant)."""
+    return build_invoice_pdf(
+        list(fixture["lines"]),
+        metadata_variant=fixture.get("metadata_variant", "canonical"),
+    )

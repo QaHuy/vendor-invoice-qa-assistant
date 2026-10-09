@@ -107,7 +107,7 @@ def test_rejection_message_is_generic():
 
 @pytest.mark.parametrize(
     "unsafe",
-    ["../../etc/passwd", "C:\\Users\\x\\inv.pdf", "a\x00b<script>.pdf", "..", "", ".hidden.pdf"],
+    ["../../etc/passwd", "..\\..\\evil.pdf", "a\x00b<script>.pdf", "..", "", ".hidden.pdf"],
 )
 def test_unsafe_filenames_are_sanitized(unsafe):
     cleaned = safe_display_filename(unsafe)
