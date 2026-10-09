@@ -92,9 +92,7 @@ def test_default_clock_returns_a_date():
 
 
 def test_streamlit_upload_limit_is_5_mb():
-    config = tomllib.loads(
-        (ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8")
-    )
+    config = tomllib.loads((ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8"))
     assert config["server"]["maxUploadSize"] == 5
 
 

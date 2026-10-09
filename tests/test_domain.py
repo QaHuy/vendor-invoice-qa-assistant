@@ -23,6 +23,7 @@ from invoice_qa.domain.transitions import allowed_transition, derive_candidate_s
 from invoice_qa.domain.validation import (
     confirmable_fields,
     effective_confidence,
+    logical_duplicate_key,
     mask_tax_id,
     validate_invoice,
 )
@@ -503,3 +504,35 @@ def test_status_and_attempt_enums_have_documented_values():
         "low_overall_confidence",
         "missing_po_reference",
     }
+
+
+# -------------------------------------------------------- logical duplicate key
+
+
+def key_for(**overrides):
+    return logical_duplicate_key(normalize_invoice(raw(**overrides)).fields)
+
+
+def test_logical_key_prefers_tax_id_and_invoice_number():
+    key = key_for()
+    assert key == key_for(vendor_name="Another Example Name", invoice_date="2026-01-01")
+    assert key != key_for(invoice_number="INV-DEMO-0002")
+
+
+def test_logical_key_falls_back_to_casefolded_name_number_and_date():
+    one = key_for(vendor_tax_id=None, vendor_name="Example  DEMO Ltd.")
+    two = key_for(vendor_tax_id=None, vendor_name="example demo ltd.")
+    assert one == two
+    assert one != key_for(
+        vendor_tax_id=None, vendor_name="example demo ltd.", invoice_date="2026-09-29"
+    )
+
+
+def test_logical_key_uses_name_branch_when_tax_id_is_malformed():
+    assert key_for(vendor_tax_id="BAD") == key_for(vendor_tax_id=None)
+
+
+def test_logical_key_is_none_until_every_component_is_valid():
+    assert key_for(invoice_number=None) is None
+    assert key_for(vendor_tax_id=None, invoice_date="30/09/2026") is None
+    assert key_for(vendor_tax_id=None, vendor_name=None) is None

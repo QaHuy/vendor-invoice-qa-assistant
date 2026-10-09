@@ -11,6 +11,7 @@ from invoice_qa.domain.models import (
     FieldConflict,
     IssueCode,
     NormalizationResult,
+    NormalizedInvoiceFields,
     Severity,
     ValidationIssue,
     ValidationResult,
@@ -163,3 +164,15 @@ def mask_tax_id(value: str | None) -> str:
     if len(value) <= 4:
         return "*" * len(value)
     return "*" * (len(value) - 4) + value[-4:]
+
+
+def logical_duplicate_key(fields: NormalizedInvoiceFields) -> str | None:
+    """Key for logical-duplicate matching, or None until every needed component is valid."""
+    if fields.invoice_number is None:
+        return None
+    if fields.vendor_tax_id is not None:
+        return f"tax|{fields.vendor_tax_id}|{fields.invoice_number}"
+    if fields.vendor_name is None or fields.invoice_date is None:
+        return None
+    name = fields.vendor_name.casefold()
+    return f"name|{name}|{fields.invoice_number}|{fields.invoice_date.isoformat()}"

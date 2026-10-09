@@ -203,3 +203,63 @@ class ValidationResult(BaseModel):
     @property
     def review_warnings(self) -> list[ValidationIssue]:
         return [i for i in self.issues if i.severity is Severity.REVIEW_WARNING]
+
+
+class SourceDocumentRecord(BaseModel):
+    """One row per unique SHA-256. Never holds PDF bytes or extracted text."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    sha256: str
+    display_filename: str
+    size_bytes: int
+    duplicate_count: int
+    created_at: str
+
+
+class AttemptRecord(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    source_document_id: str
+    method: str
+    status: AttemptStatus
+    error_code: str | None = None
+    raw: RawInvoiceFields | None = None
+    field_confidence_bps: dict[str, int] = Field(default_factory=dict)
+    conflicts: list[FieldConflict] = Field(default_factory=list)
+    created_at: str
+
+
+class InvoiceCandidate(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    attempt_id: str
+    original_raw: RawInvoiceFields
+    original_normalized: NormalizedInvoiceFields
+    original_field_confidence_bps: dict[str, int]
+    original_overall_confidence_bps: int = Field(ge=0, le=MAX_BPS)
+    conflicts: list[FieldConflict] = Field(default_factory=list)
+    effective_raw: RawInvoiceFields
+    effective_normalized: NormalizedInvoiceFields
+    corrected_fields: set[str] = Field(default_factory=set)
+    confirmed_fields: set[str] = Field(default_factory=set)
+    confirmed_distinct_candidate_ids: set[str] = Field(default_factory=set)
+    issues: list[ValidationIssue] = Field(default_factory=list)
+    status: CandidateStatus
+    created_at: str
+    updated_at: str
+
+
+class ReviewEvent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    candidate_id: str
+    event_type: ReviewEventType
+    reviewer_label: str
+    reason: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
