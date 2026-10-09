@@ -199,9 +199,7 @@ def test_decimal_serialization_has_no_exponent():
 
 
 def test_iso_date_parses_and_ambiguous_date_is_malformed():
-    assert normalize_invoice(raw(invoice_date="2026-01-02")).fields.invoice_date == date(
-        2026, 1, 2
-    )
+    assert normalize_invoice(raw(invoice_date="2026-01-02")).fields.invoice_date == date(2026, 1, 2)
     for value in ("02/01/2026", "2026-1-2", "20260102", "2026-13-01", "2026-02-30"):
         result = normalize_invoice(raw(invoice_date=value))
         assert result.fields.invoice_date is None
