@@ -49,8 +49,8 @@ write access to the database file.
 
 ## Dependencies
 
-`streamlit`, `pypdf`, `pydantic`, `pandas` and `reportlab` (pinned exactly, because fixture
-bytes depend on it); `pytest` and `ruff` for development. No real-model SDK, HTTP client or
+`streamlit`, `pypdf`, `pydantic`, `pandas` (version ranges, no lock file) and `reportlab`
+(pinned exactly, because fixture bytes depend on it); `pytest` and `ruff` for development. No real-model SDK, HTTP client or
 other PDF library is declared. The default operation is local and network-free.
 
 ## Known limitations

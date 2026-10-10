@@ -160,7 +160,8 @@ Configuration is read from the process environment only (`.env.example` document
 7. Open Metrics: **Initial review rate** stays where it was after you approve or reject, while
    **Current review backlog share** falls; run the evaluator command shown there to populate
    evaluation-only numbers.
-8. Extraction retry: upload `sample_data/generated/retry-demo-no-text.pdf` (written by the
+8. Extraction retry (see `screenshots/03-extraction-error-with-retry.png` and
+   `screenshots/04-after-manual-retry.png`): upload `sample_data/generated/retry-demo-no-text.pdf` (written by the
    generator, a valid PDF with no text layer). The page shows an extraction error and a
    **Retry extraction** button. Nothing retries until you click it; each click adds a numbered
    attempt and keeps the failed ones (it fails again here by design, because the file never
@@ -190,7 +191,8 @@ Configuration is read from the process environment only (`.env.example` document
 - Fixture byte reproducibility holds only for the pinned ReportLab version.
 - Verified locally on Python 3.14.6 and 3.11.15 (Windows 11, full test suite, Ruff and the
   evaluator on both). Other platforms and Python 3.12/3.13 for this revision were not run.
-- No screenshots are included.
+- Screenshots in `screenshots/` come from one scripted browser run on synthetic data; no
+  manual browser session was performed.
 
 ## 14. Production hardening (not done)
 

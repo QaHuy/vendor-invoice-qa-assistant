@@ -11,8 +11,20 @@ deployed; the repository has no remote.
   `uv python install 3.11 --no-bin --no-registry`, venv kept outside the repository) on
   Windows 11. `requires-python` is `>=3.11`; Ruff targets `py311`. An earlier run of the
   previous revision on 3.12.13 is not repeated here.
-- Pinned/resolved versions used: streamlit 1.65.0, pypdf 6.20.0, reportlab 5.0.1 (exact pin),
-  pydantic 2.14.0, pandas 3.0.6, pytest 9.1.1, ruff 0.16.10.
+- Linter versions differ between the two environments: the 3.14.6 environment used **Ruff
+  0.16.10**, the 3.11.15 environment used **Ruff 0.17.0** (`pyproject.toml` only requires
+  `ruff>=0.6`, so each fresh environment resolved the newest release).
+- Dependency pinning: only `reportlab==5.0.1` is pinned exactly in `pyproject.toml` (fixture
+  bytes depend on it). The other dependencies are version ranges (`streamlit>=1.50,<2`,
+  `pypdf>=6,<7`, `pydantic>=2,<3`, `pandas>=2.2,<4`, `pytest>=8`, `ruff>=0.6`) and there is no
+  lock file. Versions resolved in both environments: streamlit 1.65.0, pypdf 6.20.0, reportlab
+  5.0.1, pydantic 2.14.0, pandas 3.0.6, pytest 9.1.1.
+- **Independent review:** an independent read-only review was completed after commit `05850f1`
+  and reran: Python 3.14.6 - 334 tests passed, Ruff passed, evaluator passed; Python 3.11.15 -
+  334 tests passed, Ruff passed, evaluator passed (evaluator: 13/13 scenarios, 111/111 fields,
+  `initial_review_rate` 0.7500, `false_auto_ready` 0, `false_review` 0). It found **no new P0/P1
+  blocker** in the atomic-success, retry-concurrency, orphan-recovery or no-text-sample changes.
+  Its non-blocking findings are kept in the limitations below.
 
 ## Implemented scope
 
@@ -35,19 +47,24 @@ transaction, replacing the old two-step `finish_attempt_success` + `create_candi
 succeeded attempt without a candidate is repaired from its stored raw evidence; the sample
 generator writes `retry-demo-no-text.pdf`.
 
-## Deviation from the plan (intentional, requested by the project owner)
+## Plan alignment (retry)
 
-The plan file (`docs/superpowers/plans/...-v2.md`, not edited) states that retry is out of scope
-and that each source has exactly one attempt (lines 35, 48, 280, 333, 507, 1471, and the
-`UNIQUE(source_document_id)` test at ~925). The follow-up request overrode that, so the
-implementation now **differs from the plan** on exactly this point; README, About page and tests
-describe the new behaviour. The plan was not changed to match.
+The original plan stated that retry was out of scope and that each source had exactly one
+attempt. At the project owner's request the implementation added explicit manual retry, and the
+plan file (kept outside this repository and not tracked) was then updated by the owner's
+instruction so that it describes the implemented behaviour: several immutable numbered attempts
+per source, at most one `started` and one `succeeded` attempt, `attempt_in_progress` for a
+recent attempt, the 10-minute stale threshold, repair of a succeeded attempt without a
+candidate from stored evidence, atomic completion, the `initial_review_rate` /
+`current_review_backlog_share` split, and `retry-demo-no-text.pdf`. Automatic retry, backoff and
+retry limits remain out of scope. The plan and the implementation therefore no longer conflict
+on retry.
 
 ## Omitted scope (by design)
 
 Real model/API client, automatic extraction retry/backoff, amount rounding, email ingestion,
 ERP/payment integrations, authentication, OCR, reopen of terminal candidates, counting security-rejected
-uploads in persisted metrics, screenshots.
+uploads in persisted metrics.
 
 ## Exact commands run (from the repository root, inside `.venv`)
 
@@ -115,8 +132,10 @@ with the rules, so they do not indicate real-world accuracy.
    to the export; a small hardening not in the plan.
 5. **Navigation** is a sidebar radio (Upload, Review Queue, Metrics, About) so AppTest can
    assert it.
-6. **Final review** was a self-review by the implementing agent (no subagents allowed by the
-   run instructions); an independent review is still required.
+6. **Final review** of the original eight tasks was a self-review by the implementing agent
+   (no subagents allowed by the run instructions). The retry-integrity follow-up (`05850f1`)
+   received an independent read-only review, summarised in the header; the original tasks have
+   not had a separate independent review.
 7. The Task 5 and Task 7 commits were amended locally (unpushed): Task 5 to include a lint
    fix, Task 7 to replace a hostile-filename test vector that looked like an absolute path.
 8. **Retry (follow-up, overrides the plan):** retry needs the file again because PDF bytes are
@@ -158,19 +177,21 @@ with the rules, so they do not indicate real-world accuracy.
 
 ## Known bugs and limitations
 
-- See README section 13. In addition: the Streamlit pages were exercised through AppTest only
-  (including uploads and the retry button), never manually in a browser. An earlier version of
-  this file said AppTest cannot simulate uploads; that was wrong for Streamlit 1.65
-  (`FileUploader.set_value`) and the UI tests now upload real PDFs.
+- See README section 13. In addition: the Streamlit pages are covered by AppTest (including
+  real uploads and the retry button), and one scripted browser smoke test was run (see
+  "Browser smoke test" below). No human has used the app by hand in a browser yet; the owner
+  should do one manual pass. An earlier version of this file said AppTest cannot simulate
+  uploads; that was wrong for Streamlit 1.65 (`FileUploader.set_value`).
 - The suite was run on 3.14.6 and 3.11.15 only (not 3.12/3.13 for this revision).
 - Streamlit sessions share one SQLite file; concurrent writers are serialized by SQLite
   (`BEGIN IMMEDIATE`). The concurrency test uses two `Database`/`IntakeService` instances and
   two threads on one file, not two browser sessions.
 - The "already in progress" message is cached per uploaded file in a session; the user must
   remove and re-upload the file to see the result (a refresh button was not added).
-- The retry-integrity fixes were reviewed only by the implementing agent; the independent
-  reviewer's findings were the input to this change, and no new independent review of these
-  fixes has been done.
+- The stale threshold (10 minutes) is a documented guess; a crashed attempt blocks retry until
+  it expires, and an extraction slower than the threshold could be interrupted.
+- Orphan-attempt repair and the legacy-database upgrade were verified on synthetic fixtures
+  only; no real legacy database exists to test against.
 - Line endings: Git on this machine warns that LF will become CRLF in the working copy
   (`core.autocrlf`); stored content is unaffected.
 
@@ -194,6 +215,37 @@ time; no secrets in the repository. See SECURITY.md.
 - `sample_data/manifest.json`, `scripts/evaluate.py` - ground truth and false-count logic.
 - `README.md` evidence-dependent claims (table above).
 
+## Browser smoke test
+
+One scripted run (not a manual session): headless Google Chrome driven by Playwright 1.63.0,
+which was installed in a throwaway virtual environment outside the repository. The app was
+started from the repository's own environment on `127.0.0.1` with a database in a temporary
+directory and usage statistics off, using only the generated synthetic PDFs, then stopped. The
+flows were executed in two script parts against the same database, and the first part was
+re-run once after a locator problem, so the sequence below is the verified outcome rather than
+one uninterrupted run:
+
+- clean invoice upload -> `auto_ready`;
+- malformed-amount invoice upload -> `review_required`;
+- `retry-demo-no-text.pdf` upload -> generic extraction error and a **Retry extraction**
+  button, with no attempt created until the click;
+- one manual **Retry extraction** click -> a second immutable `error` attempt (attempt 2), the
+  first kept;
+- Review Queue: correction of `Subtotal` to `1,000.00` turned the candidate `auto_ready`
+  (initial routing stayed `review_required`); both candidates approved;
+- approved CSV download: 2 rows, vendor tax IDs masked (no full `DEMO-TAX-` ID present);
+- Metrics page: initial review rate 50 % (unchanged by approvals), current review backlog
+  share 0 %, 1 retry attempt, 2 failed attempts.
+
+Not exercised in the browser: reject, confirm-low-confidence, confirm-distinct, JSON download,
+the stale-attempt path, and the "already in progress" message (these are covered by AppTest or
+service tests).
+
 ## Screenshots
 
-None produced (`screenshots/.gitkeep` only).
+`screenshots/` holds eight PNGs captured from that run (synthetic data only; no local paths,
+e-mail addresses or secrets are visible; the Streamlit "Deploy" toolbar of the local dev server
+is visible):
+`01-upload-clean-invoice`, `02-upload-review-required`, `03-extraction-error-with-retry`,
+`04-after-manual-retry`, `05-review-queue`, `06-review-required-candidate`,
+`07-approved-and-export`, `08-metrics`.
