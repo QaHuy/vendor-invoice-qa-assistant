@@ -1,11 +1,11 @@
 # Review handoff
 
 Synthetic-data portfolio MVP. Not production software. Published as a public portfolio
-repository at `https://github.com/huyha-wq/vendor-invoice-qa-assistant`; not deployed.
+repository at `https://github.com/QaHuy/vendor-invoice-qa-assistant`; not deployed.
 
-- **Baselines:** original evaluation commit `68f545b`; retry + metrics split `d7a7d27`
-  (documented by `23b736d`); retry-integrity fixes (atomic success, no early interruption,
-  recovery, no-text sample) are in `4445892`. These are the public-history SHAs after the
+- **Baselines:** original evaluation commit `efde235`; retry + metrics split `42c8830`
+  (documented by `3c10c20`); retry-integrity fixes (atomic success, no early interruption,
+  recovery, no-text sample) are in `d9cdcab`. These are the public-history SHAs after the
   pre-public privacy rewrite.
 - Verified with Python **3.14.6** (primary `.venv`) and **3.11.15** (uv-managed, installed with
   `uv python install 3.11 --no-bin --no-registry`, venv kept outside the repository) on
@@ -20,7 +20,7 @@ repository at `https://github.com/huyha-wq/vendor-invoice-qa-assistant`; not dep
   lock file. Versions resolved in both environments: streamlit 1.65.0, pypdf 6.20.0, reportlab
   5.0.1, pydantic 2.14.0, pandas 3.0.6, pytest 9.1.1.
 - **Independent review:** an independent read-only review was completed after the change now
-  published as commit `4445892`
+  published as commit `d9cdcab`
   and reran: Python 3.14.6 - 334 tests passed, Ruff passed, evaluator passed; Python 3.11.15 -
   334 tests passed, Ruff passed, evaluator passed (evaluator: 13/13 scenarios, 111/111 fields,
   `initial_review_rate` 0.7500, `false_auto_ready` 0, `false_review` 0). It found **no new P0/P1
@@ -35,7 +35,7 @@ deterministic extraction, AI protocol + validation boundary + test-only fake pro
 storage with append-only/immutability triggers; intake, review, metrics and export services;
 four-page Streamlit UI; reproducible 13-scenario evaluation; README, SECURITY.md.
 
-Follow-up (commit `d7a7d27`, requested after the original run): explicit extraction retry
+Follow-up (commit `42c8830`, requested after the original run): explicit extraction retry
 (several immutable numbered attempts per source, in-place upgrade of older databases, a
 **Retry extraction** button) and `initial_review_rate` vs. `current_review_backlog_share`
 (initial routing persisted on each candidate).
@@ -134,7 +134,7 @@ with the rules, so they do not indicate real-world accuracy.
 5. **Navigation** is a sidebar radio (Upload, Review Queue, Metrics, About) so AppTest can
    assert it.
 6. **Final review** of the original eight tasks was a self-review by the implementing agent
-   (no subagents allowed by the run instructions). The retry-integrity follow-up (`4445892`)
+   (no subagents allowed by the run instructions). The retry-integrity follow-up (`d9cdcab`)
    received an independent read-only review, summarised in the header; the original tasks have
    not had a separate independent review.
 7. The Task 5 and Task 7 commits were amended locally (unpushed): Task 5 to include a lint
