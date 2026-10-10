@@ -112,17 +112,17 @@ def _aggregate(scenarios: list[dict]) -> dict:
     candidates = [s for s in routed if s["actual"]["status"] in (auto_ready, review_required)]
     fields_correct = sum(s["fields_correct"] for s in scenarios)
     fields_total = sum(s["fields_total"] for s in scenarios)
-    review_rate = None
+    initial_review_rate = None
     if candidates:
         flagged = sum(1 for s in candidates if s["actual"]["status"] == review_required)
-        review_rate = flagged / len(candidates)
+        initial_review_rate = flagged / len(candidates)
     return {
         "scenarios_total": len(scenarios),
         "scenarios_passed": sum(1 for s in scenarios if s["passed"]),
         "fields_correct": fields_correct,
         "fields_total": fields_total,
         "field_accuracy": fields_correct / fields_total if fields_total else None,
-        "review_rate": review_rate,
+        "initial_review_rate": initial_review_rate,
         "false_auto_ready": false_auto,
         "false_review": false_review,
     }
@@ -139,11 +139,11 @@ def main(argv: list[str] | None = None) -> int:
     aggregate = report["aggregate"]
     for scenario in report["scenarios"]:
         print(f"{'PASS' if scenario['passed'] else 'FAIL'}  {scenario['id']}")
-    rate = aggregate["review_rate"]
+    rate = aggregate["initial_review_rate"]
     print(
         f"scenarios {aggregate['scenarios_passed']}/{aggregate['scenarios_total']}  "
         f"field_accuracy {aggregate['fields_correct']}/{aggregate['fields_total']}  "
-        f"review_rate {'n/a' if rate is None else format(rate, '.4f')}  "
+        f"initial_review_rate {'n/a' if rate is None else format(rate, '.4f')}  "
         f"false_auto_ready {aggregate['false_auto_ready']}  "
         f"false_review {aggregate['false_review']}"
     )

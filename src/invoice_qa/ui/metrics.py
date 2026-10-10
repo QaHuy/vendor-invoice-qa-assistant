@@ -20,19 +20,31 @@ def render() -> None:
     columns = st.columns(4)
     columns[0].metric("Processed sources", data["sources"])
     columns[1].metric("Extraction attempts", data["attempts"])
-    columns[2].metric("Extraction errors", data["extraction_errors"])
+    columns[2].metric("Failed attempts", data["extraction_errors"])
     columns[3].metric("Content duplicates", data["content_duplicates"])
     columns = st.columns(4)
     columns[0].metric("Logical duplicate flags", data["logical_duplicate_flags"])
     columns[1].metric("Auto-ready", counts["auto_ready"])
     columns[2].metric("Review required", counts["review_required"])
     columns[3].metric("Approved / rejected", f"{counts['approved']} / {counts['rejected']}")
+    columns = st.columns(3)
+    columns[0].metric("Initial review rate", _percent(data["initial_review_rate"]))
+    columns[1].metric(
+        "Current review backlog share", _percent(data["current_review_backlog_share"])
+    )
+    columns[2].metric("Retry attempts", data["retry_attempts"])
     average = data["average_original_confidence_bps"]
     st.caption(
-        f"Review rate (currently review required / successful candidates): "
-        f"{_percent(data['review_rate'])}. "
+        "Initial review rate: candidates routed to review when created / candidates with "
+        "recorded routing; it never changes after review. Current review backlog share: "
+        "candidates waiting for review now / all candidates. "
         f"Average original confidence: {'n/a' if average is None else f'{average} bps'}."
     )
+    if data["initial_routing_unknown"]:
+        st.caption(
+            f"{data['initial_routing_unknown']} candidate(s) predate routing records and are "
+            "excluded from the initial review rate."
+        )
 
     st.subheader("Evaluation-only metrics (synthetic, local)")
     if evaluation is None:
@@ -43,5 +55,7 @@ def render() -> None:
     columns[0].metric("False auto-ready", evaluation.get("false_auto_ready", "n/a"))
     columns[1].metric("False review", evaluation.get("false_review", "n/a"))
     columns[2].metric("Field accuracy", _percent(evaluation.get("field_accuracy")))
-    columns[3].metric("Evaluation review rate", _percent(evaluation.get("review_rate")))
+    columns[3].metric(
+        "Evaluation initial review rate", _percent(evaluation.get("initial_review_rate"))
+    )
     st.caption("Results come from the committed synthetic manifest only.")

@@ -124,8 +124,8 @@ def test_connections_enforce_foreign_keys(db):
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
-                "INSERT INTO extraction_attempts (id, source_document_id, method, status, "
-                "created_at) VALUES ('x', 'missing', 'deterministic', 'started', 't')"
+                "INSERT INTO extraction_attempts (id, source_document_id, attempt_number, method, "
+                "status, created_at) VALUES ('x', 'missing', 1, 'deterministic', 'started', 't')"
             )
 
 
@@ -144,11 +144,108 @@ def test_source_sha_is_unique_and_reused(db):
             )
 
 
-def test_second_attempt_for_a_source_is_rejected(db):
+def test_second_attempt_while_the_first_is_in_flight_is_rejected(db):
     source, _ = db.get_or_create_source_document("d" * 64, "a.pdf", 5)
     db.create_attempt(source.id, "deterministic")
     with pytest.raises(sqlite3.IntegrityError):
         db.create_attempt(source.id, "deterministic")
+
+
+def test_attempts_are_numbered_and_every_failed_attempt_is_preserved(db):
+    source, _ = db.get_or_create_source_document("d1" * 32, "a.pdf", 5)
+    first = db.create_attempt(source.id, "deterministic")
+    assert first.attempt_number == 1
+    db.finish_attempt_error(first.id, "no_extractable_text")
+    second = db.retry_attempt(source.id, "deterministic")
+    assert second.attempt_number == 2
+    db.finish_attempt_error(second.id, "extraction_failed")
+    third = db.retry_attempt(source.id, "deterministic")
+    assert third.attempt_number == 3
+    attempts = db.list_attempts_for_source(source.id)
+    assert [(a.attempt_number, a.status, a.error_code) for a in attempts] == [
+        (1, AttemptStatus.ERROR, "no_extractable_text"),
+        (2, AttemptStatus.ERROR, "extraction_failed"),
+        (3, AttemptStatus.STARTED, None),
+    ]
+    assert db.get_attempt_for_source(source.id).id == third.id
+
+
+def test_failed_attempts_stay_immutable_after_a_retry(db):
+    source, _ = db.get_or_create_source_document("d2" * 32, "a.pdf", 5)
+    first = db.create_attempt(source.id, "deterministic")
+    db.finish_attempt_error(first.id, "no_extractable_text")
+    db.retry_attempt(source.id, "deterministic")
+    with pytest.raises(sqlite3.DatabaseError):
+        db.finish_attempt_error(first.id, "rewritten")
+    with pytest.raises(sqlite3.DatabaseError):
+        db.finish_attempt_success(first.id, RAW, CONFIDENCE, [])
+    with db.connect() as connection:
+        with pytest.raises(sqlite3.DatabaseError):
+            connection.execute("DELETE FROM extraction_attempts WHERE id = ?", (first.id,))
+    assert db.list_attempts_for_source(source.id)[0].error_code == "no_extractable_text"
+
+
+def test_retry_of_a_stranded_started_attempt_preserves_it_as_interrupted(db):
+    source, _ = db.get_or_create_source_document("d3" * 32, "a.pdf", 5)
+    stranded = db.create_attempt(source.id, "deterministic")
+    retry = db.retry_attempt(source.id, "deterministic")
+    attempts = db.list_attempts_for_source(source.id)
+    assert [a.id for a in attempts] == [stranded.id, retry.id]
+    assert attempts[0].status is AttemptStatus.ERROR
+    assert attempts[0].error_code == "extraction_interrupted"
+    assert attempts[1].status is AttemptStatus.STARTED
+
+
+def test_retry_is_refused_after_a_successful_attempt(db):
+    candidate = make_candidate(db, sha="d4" * 32)
+    source = db.get_or_create_source_document("d4" * 32, "invoice.pdf", 1234)[0]
+    with pytest.raises(database_module.RetryNotAllowed):
+        db.retry_attempt(source.id, "deterministic")
+    assert len(db.list_attempts_for_source(source.id)) == 1
+    assert db.get_candidate(candidate.id) is not None
+
+
+def test_retry_is_refused_for_an_unknown_source_and_creates_nothing(db):
+    with pytest.raises(database_module.RetryNotAllowed):
+        db.retry_attempt("missing", "deterministic")
+    assert db.metrics_snapshot()["attempts"] == 0
+
+
+def test_retry_of_a_source_that_crashed_before_its_first_attempt_starts_attempt_one(db):
+    source, _ = db.get_or_create_source_document("d5" * 32, "a.pdf", 5)
+    assert db.get_attempt_for_source(source.id) is None
+    assert db.retry_attempt(source.id, "deterministic").attempt_number == 1
+
+
+def test_a_source_can_never_hold_two_succeeded_attempts(db):
+    make_candidate(db, sha="d6" * 32)
+    source = db.get_or_create_source_document("d6" * 32, "invoice.pdf", 1234)[0]
+    with pytest.raises(sqlite3.IntegrityError):
+        db.create_attempt(source.id, "deterministic")
+
+
+def test_initial_status_is_persisted_and_immutable(db):
+    candidate = make_candidate(db, status=CandidateStatus.REVIEW_REQUIRED)
+    assert candidate.initial_status is CandidateStatus.REVIEW_REQUIRED
+    changed = apply_change(
+        db,
+        candidate,
+        status=CandidateStatus.REJECTED,
+        event_type=ReviewEventType.REJECTED,
+        reason="duplicate",
+    )
+    assert changed.status is CandidateStatus.REJECTED
+    assert changed.initial_status is CandidateStatus.REVIEW_REQUIRED
+    with db.connect() as connection:
+        with pytest.raises(sqlite3.DatabaseError):
+            connection.execute(
+                "UPDATE candidates SET initial_status = 'auto_ready' WHERE id = ?",
+                (candidate.id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE candidates SET initial_status = 'bogus' WHERE id = ?", (candidate.id,)
+            )
 
 
 def test_terminal_attempts_are_immutable(db):

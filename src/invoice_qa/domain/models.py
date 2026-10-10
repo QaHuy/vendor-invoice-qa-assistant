@@ -223,6 +223,7 @@ class AttemptRecord(BaseModel):
 
     id: str
     source_document_id: str
+    attempt_number: int = Field(default=1, ge=1)
     method: str
     status: AttemptStatus
     error_code: str | None = None
@@ -249,6 +250,8 @@ class InvoiceCandidate(BaseModel):
     confirmed_distinct_candidate_ids: set[str] = Field(default_factory=set)
     issues: list[ValidationIssue] = Field(default_factory=list)
     status: CandidateStatus
+    # Routing at creation; immutable. ``None`` only for rows created before it was recorded.
+    initial_status: CandidateStatus | None = None
     created_at: str
     updated_at: str
 

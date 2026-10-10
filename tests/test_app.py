@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from factories import make_pdf
+from factories import make_pdf, no_text_pdf
+from fakes import FlakyExtractor
 from invoice_qa.domain.models import CandidateStatus
 from invoice_qa.ui import helpers
 
@@ -93,7 +94,7 @@ def test_ui_errors_are_generic():
         "invalid_pdf_header",
     ):
         assert helpers.upload_rejection_message(code) == helpers.GENERIC_UPLOAD_MESSAGE
-    for code in ("extraction_failed", "no_extractable_text", "anything_else"):
+    for code in ("extraction_failed", "no_extractable_text", "extraction_interrupted", "other"):
         message = helpers.extraction_error_message(code)
         assert "retry" in message.lower()
         assert code not in message
@@ -165,3 +166,91 @@ def test_about_states_synthetic_data_and_non_production_limits(db_path):
     assert "synthetic" in text
     assert "not production" in text or "not a production" in text
     assert "real-provider" in text or "real provider" in text
+
+
+# ------------------------------------------------------------------ explicit retry
+
+
+def upload(at: AppTest, name: str, content: bytes) -> AppTest:
+    at.file_uploader[0].set_value((name, content, "application/pdf"))
+    return at.run()
+
+
+def use_extractor(monkeypatch, extractor):
+    monkeypatch.setattr(helpers, "DeterministicExtractor", lambda: extractor)
+
+
+def test_upload_page_processes_a_pdf_and_offers_no_retry_on_success(db_path):
+    at = upload(open_page("Upload"), "a.pdf", make_pdf())
+    assert not at.exception
+    assert any("Status: auto_ready" in s.value for s in at.success)
+    assert not [b for b in at.button if b.key == "retry_extraction"]
+
+
+def test_extraction_error_offers_an_explicit_retry_and_never_retries_on_its_own(
+    db_path, database
+):
+    at = upload(open_page("Upload"), "scan.pdf", no_text_pdf())
+    assert at.button(key="retry_extraction")
+    at.run()
+    at.run()
+    assert database.metrics_snapshot()["attempts"] == 1
+
+
+def test_clicking_retry_adds_an_attempt_and_keeps_the_failed_one(db_path, database):
+    at = upload(open_page("Upload"), "scan.pdf", no_text_pdf())
+    at.button(key="retry_extraction").click().run()
+    assert not at.exception
+    assert at.button(key="retry_extraction")  # still failing, still retryable
+    snapshot = database.metrics_snapshot()
+    assert (snapshot["sources"], snapshot["attempts"], snapshot["extraction_errors"]) == (1, 2, 2)
+    assert snapshot["retry_attempts"] == 1
+
+
+def test_successful_retry_shows_the_candidate_and_removes_the_retry_button(
+    db_path, database, monkeypatch
+):
+    use_extractor(monkeypatch, FlakyExtractor(failures=1))
+    at = upload(open_page("Upload"), "a.pdf", make_pdf())
+    assert at.button(key="retry_extraction")
+    at.button(key="retry_extraction").click().run()
+    assert any("Status: auto_ready" in s.value for s in at.success)
+    assert not [b for b in at.button if b.key == "retry_extraction"]
+    assert len(database.list_candidates()) == 1
+    assert database.metrics_snapshot()["attempts"] == 2
+
+
+def test_uploading_a_successful_file_again_returns_it_without_a_new_attempt(
+    db_path, database
+):
+    upload(open_page("Upload"), "a.pdf", make_pdf())
+    again = upload(open_page("Upload"), "renamed.pdf", make_pdf())
+    assert any("uploaded before" in i.value for i in again.info)
+    assert not [b for b in again.button if b.key == "retry_extraction"]
+    snapshot = database.metrics_snapshot()
+    assert (snapshot["attempts"], snapshot["content_duplicates"]) == (1, 1)
+
+
+def test_reuploading_a_failed_file_offers_retry_but_does_not_extract_again(
+    db_path, database, monkeypatch
+):
+    extractor = FlakyExtractor(failures=5)
+    use_extractor(monkeypatch, extractor)
+    upload(open_page("Upload"), "scan.pdf", make_pdf())
+    again = upload(open_page("Upload"), "scan.pdf", make_pdf())
+    assert any("uploaded before" in i.value for i in again.info)
+    assert again.button(key="retry_extraction")
+    assert extractor.calls == 1
+
+
+def test_metrics_page_separates_initial_review_rate_from_current_backlog_share(
+    db_path, intake, review
+):
+    clean = intake.process_upload("a.pdf", make_pdf()).candidate
+    flagged = intake.process_upload("b.pdf", make_pdf({"Subtotal": "1,0000"})).candidate
+    review.reject(flagged.id, reviewer_label="Reviewer A", reason="Invalid demo invoice")
+    review.approve(clean.id, reviewer_label="Reviewer A")
+    at = open_page("Metrics")
+    labels = {m.label: m.value for m in at.metric}
+    assert labels["Initial review rate"] == "50%"
+    assert labels["Current review backlog share"] == "0%"

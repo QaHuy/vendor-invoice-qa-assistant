@@ -40,14 +40,15 @@ Project license: not yet selected. Dependencies include permissive-licensed libr
 pypdf and ReportLab; this is not legal advice.
 
 ### Known limitations
-Narrow label-value format only; no OCR; one extraction attempt per document and no retry;
-no authentication; no credit notes, multi-rate VAT, withholding tax or rounding adjustments;
-rejected uploads are not counted in persisted metrics. Real-provider AI integration is out of
-scope: only the protocol, a test-only fake and the validation boundary exist.
+Narrow label-value format only; no OCR; a failed extraction is retried only when a user asks
+(every attempt is kept), never automatically; no authentication; no credit notes, multi-rate
+VAT, withholding tax or rounding adjustments; rejected uploads are not counted in persisted
+metrics. Real-provider AI integration is out of scope: only the protocol, a test-only fake and
+the validation boundary exist.
 
 ### Production hardening (not done)
 Authentication and roles, managed database and retention policy, monitoring, reopen flow,
-retry policy, OCR, ERP integration, and a legal review of data handling.
+automatic retry policy and backoff, OCR, ERP integration, and a legal review of data handling.
 """
 
 

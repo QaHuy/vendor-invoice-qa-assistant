@@ -20,9 +20,13 @@ class MetricsService:
 
     def snapshot(self) -> dict[str, Any]:
         data = self._db.metrics_snapshot()
+        # Initial rate: routing at creation (never changes). Backlog share: status right now.
+        initial = data["initial_status_counts"]
+        known = sum(initial.values())
+        data["initial_review_rate"] = initial["review_required"] / known if known else None
         successful = data["successful_candidates"]
-        review_required = data["status_counts"]["review_required"]
-        data["review_rate"] = review_required / successful if successful else None
+        waiting = data["status_counts"]["review_required"]
+        data["current_review_backlog_share"] = waiting / successful if successful else None
         return data
 
     def evaluation_summary(self) -> dict[str, Any] | None:

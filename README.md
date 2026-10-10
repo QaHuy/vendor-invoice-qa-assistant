@@ -43,8 +43,11 @@ Synthetic PDF -> file-security checks -> deterministic text extraction -> raw fi
   confidence.
 - Field-level correction errors, confirmation of low-confidence fields only, duplicate
   resolution, approval with re-validation, rejection with a reason.
-- Content-duplicate and logical-duplicate handling; one extraction attempt per document and
-  no retry path.
+- Content-duplicate and logical-duplicate handling. A document that is already known never
+  extracts again on its own; after an extraction error the user can choose **Retry extraction**.
+  Every attempt (failed, interrupted or successful) is kept as an immutable, numbered row.
+- Metrics separate the **initial review rate** (routing recorded when the candidate was
+  created, never rewritten) from the **current review backlog share** (waiting for review now).
 - Approved-only export (CSV/JSON) with masked vendor tax IDs.
 - Reproducible 13-scenario synthetic evaluation with false-auto-ready / false-review counts.
 
@@ -116,7 +119,7 @@ Measured on 2026-10-10 (synthetic, local; code baseline in `REVIEW_HANDOFF.md`):
 |---|---|
 | Scenarios matching the manifest | 13 / 13 |
 | Field-level accuracy (fields with defined ground truth) | 111 / 111 |
-| Review rate (review_required / successful new candidates) | 0.75 (9 of 12) |
+| Initial review rate (review_required at creation / new candidates) | 0.75 (9 of 12) |
 | False auto-ready | 0 |
 | False review | 0 |
 
@@ -150,13 +153,22 @@ Configuration is read from the process environment only (`.env.example` document
 4. Upload `fx09-low-confidence-alias.pdf`; confirm `vendor_name` (the only confirmable field).
 5. Upload `fx12-logical-duplicate.pdf`; resolve it by rejecting or confirming distinctness.
 6. Approve a candidate, then download the approved CSV/JSON from the Review Queue.
-7. Open Metrics; run the evaluator command shown there to populate evaluation-only numbers.
+7. Open Metrics: **Initial review rate** stays where it was after you approve or reject, while
+   **Current review backlog share** falls; run the evaluator command shown there to populate
+   evaluation-only numbers.
+8. Extraction retry: upload a PDF with no text layer (for example one made with ReportLab that
+   draws only a shape); the page shows an extraction error and a **Retry extraction** button.
+   Nothing retries until you click it; each click adds an attempt and keeps the failed ones.
 
 ## 13. Known limitations
 
 - Only the documented label-value format is supported; no OCR, no fuzzy matching.
-- One extraction attempt per document and no retry; a stranded `started` attempt is reported
-  as interrupted and never retried.
+- Retry is manual only (no automatic retry, backoff or limit on attempts). The PDF is never
+  stored, so a retry needs the same file uploaded again; a stranded `started` attempt is
+  preserved as `extraction_interrupted` when the user retries. Two sessions retrying the same
+  document at once is not handled gracefully (the later click interrupts the earlier attempt).
+- A database created before retry existed is upgraded in place on first start; its candidates
+  have no recorded initial routing and are excluded from the initial review rate.
 - Uploads rejected by file-security checks are shown to the user but not counted in metrics.
 - No authentication, roles, multi-tenancy or retention policy.
 - Out of scope: credit notes, multi-rate VAT, withholding tax, rounding adjustments,
@@ -169,7 +181,7 @@ Configuration is read from the process environment only (`.env.example` document
 ## 14. Production hardening (not done)
 
 Authentication and RBAC, managed database and retention, monitoring and alerting, a reopen
-flow, retry policy, OCR, ERP integration, real-provider integration with its own threat
+flow, automatic retry policy, OCR, ERP integration, real-provider integration with its own threat
 model, and a legal/privacy review.
 
 ## 15. Dependency licenses

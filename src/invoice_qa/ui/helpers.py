@@ -84,8 +84,8 @@ def upload_rejection_message(code: str) -> str:
 
 def extraction_error_message(code: str) -> str:
     return (
-        "The document could not be read for extraction. "
-        "This demo has no retry option; upload a different document."
+        "The document could not be read for extraction. You can retry the extraction; "
+        "every failed attempt stays in the record."
     )
 
 

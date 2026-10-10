@@ -1,4 +1,9 @@
-"""Test-only fake AI provider. The application never imports this module."""
+"""Test-only fakes. The application never imports this module."""
+
+from conftest import TODAY
+from invoice_qa.extraction.base import ExtractionResult
+from invoice_qa.extraction.deterministic import DeterministicExtractor
+from invoice_qa.services.intake import IntakeService
 
 
 class FakeAIProvider:
@@ -28,3 +33,26 @@ class FakeAIProvider:
                 "currency": {"value": None, "confidence_bps": 0},
             }
         }
+
+
+class FlakyExtractor:
+    """Fails the first ``failures`` calls with a safe code, then behaves like the real one."""
+
+    method = "deterministic"
+
+    def __init__(self, failures: int, error_code: str = "extraction_failed") -> None:
+        self.failures = failures
+        self.error_code = error_code
+        self.calls = 0
+        self._real = DeterministicExtractor()
+
+    def extract(self, pdf_bytes: bytes) -> ExtractionResult:
+        self.calls += 1
+        if self.calls <= self.failures:
+            return ExtractionResult(method=self.method, error_code=self.error_code)
+        return self._real.extract(pdf_bytes)
+
+
+def flaky_service(database, failures, **kwargs):
+    extractor = FlakyExtractor(failures, **kwargs)
+    return IntakeService(database, extractor, today_provider=lambda: TODAY), extractor

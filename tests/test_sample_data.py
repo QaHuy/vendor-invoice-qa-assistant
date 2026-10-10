@@ -178,7 +178,8 @@ def test_evaluator_matches_the_manifest_with_zero_false_counts(evaluator, tmp_pa
     assert aggregate["scenarios_total"] == 13
     assert aggregate["scenarios_passed"] == 13
     assert aggregate["field_accuracy"] == 1.0
-    assert 0 < aggregate["review_rate"] < 1
+    assert 0 < aggregate["initial_review_rate"] < 1
+    assert "review_rate" not in aggregate
     assert all(item["passed"] for item in report["scenarios"])
     assert "\\" not in output.read_text(encoding="utf-8")
 

@@ -2,9 +2,11 @@ from datetime import date
 
 from conftest import TODAY
 from factories import encrypted_pdf, make_pdf, malformed_pdf, no_text_pdf
+from fakes import flaky_service
 from invoice_qa.domain.models import AttemptStatus, CandidateStatus, IssueCode
 from invoice_qa.extraction.base import ExtractionResult
 from invoice_qa.extraction.deterministic import DeterministicExtractor
+from invoice_qa.infrastructure.file_security import sha256_bytes
 from invoice_qa.services.intake import IntakeOutcome, IntakeService
 
 
@@ -119,16 +121,159 @@ def test_content_duplicate_of_failed_source_returns_recorded_error(intake, datab
     assert first.source_document_id == second.source_document_id
 
 
-def test_stranded_started_attempt_is_reported_as_interrupted_never_retried(intake, database):
+def test_stranded_started_attempt_is_reported_as_interrupted_and_not_retried_implicitly(
+    intake, database
+):
     pdf = make_pdf()
-    from invoice_qa.infrastructure.file_security import sha256_bytes
-
     source, _ = database.get_or_create_source_document(sha256_bytes(pdf), "invoice.pdf", len(pdf))
     database.create_attempt(source.id, "deterministic")
     result = intake.process_upload("invoice.pdf", pdf)
     assert result.outcome is IntakeOutcome.EXTRACTION_ERROR
     assert result.error_code == "extraction_interrupted"
+    assert result.retryable
     assert database.list_candidates() == []
+    assert len(database.list_attempts_for_source(source.id)) == 1
+
+
+# ------------------------------------------------------------------ explicit retry
+
+
+def test_error_result_offers_retry_but_a_reupload_never_retries_by_itself(database):
+    service, extractor = flaky_service(database, failures=1)
+    first = service.process_upload("a.pdf", make_pdf())
+    assert first.outcome is IntakeOutcome.EXTRACTION_ERROR and first.retryable
+    again = service.process_upload("a.pdf", make_pdf())
+    assert again.content_duplicate and again.retryable
+    assert again.outcome is IntakeOutcome.EXTRACTION_ERROR
+    assert extractor.calls == 1
+    assert database.metrics_snapshot()["attempts"] == 1
+
+
+def test_explicit_retry_after_an_error_creates_a_second_attempt_and_a_candidate(database):
+    service, _ = flaky_service(database, failures=1)
+    failed = service.process_upload("a.pdf", make_pdf())
+    result = service.retry_extraction("a.pdf", make_pdf())
+    assert result.outcome is IntakeOutcome.CANDIDATE
+    assert not result.retryable
+    assert result.source_document_id == failed.source_document_id
+    assert result.candidate.status is CandidateStatus.AUTO_READY
+    attempts = database.list_attempts_for_source(failed.source_document_id)
+    assert [(a.attempt_number, a.status) for a in attempts] == [
+        (1, AttemptStatus.ERROR),
+        (2, AttemptStatus.SUCCEEDED),
+    ]
+    assert attempts[0].error_code == "extraction_failed"
+    assert result.candidate.attempt_id == attempts[1].id
+    assert len(database.list_candidates()) == 1
+
+
+def test_retry_that_fails_again_keeps_both_failed_attempts(database):
+    service, _ = flaky_service(database, failures=2, error_code="no_extractable_text")
+    first = service.process_upload("a.pdf", make_pdf())
+    second = service.retry_extraction("a.pdf", make_pdf())
+    assert second.outcome is IntakeOutcome.EXTRACTION_ERROR
+    assert second.error_code == "no_extractable_text" and second.retryable
+    attempts = database.list_attempts_for_source(first.source_document_id)
+    assert [a.status for a in attempts] == [AttemptStatus.ERROR, AttemptStatus.ERROR]
+    third = service.retry_extraction("a.pdf", make_pdf())
+    assert third.outcome is IntakeOutcome.CANDIDATE
+    assert len(database.list_attempts_for_source(first.source_document_id)) == 3
+
+
+def test_retry_of_a_stranded_attempt_preserves_it_and_can_succeed(intake, database):
+    pdf = make_pdf()
+    source, _ = database.get_or_create_source_document(sha256_bytes(pdf), "invoice.pdf", len(pdf))
+    database.create_attempt(source.id, "deterministic")
+    result = intake.retry_extraction("invoice.pdf", pdf)
+    assert result.outcome is IntakeOutcome.CANDIDATE
+    attempts = database.list_attempts_for_source(source.id)
+    assert [(a.status, a.error_code) for a in attempts] == [
+        (AttemptStatus.ERROR, "extraction_interrupted"),
+        (AttemptStatus.SUCCEEDED, None),
+    ]
+
+
+def test_retry_of_a_successful_source_returns_the_candidate_without_a_new_attempt(
+    intake, database
+):
+    first = intake.process_upload("a.pdf", make_pdf())
+    again = intake.retry_extraction("a.pdf", make_pdf())
+    assert again.outcome is IntakeOutcome.CANDIDATE and again.content_duplicate
+    assert again.candidate.id == first.candidate.id
+    assert not again.retryable
+    snapshot = database.metrics_snapshot()
+    assert (snapshot["attempts"], snapshot["successful_candidates"]) == (1, 1)
+
+
+def test_retry_of_an_approved_source_still_returns_the_approved_candidate(intake, review):
+    first = intake.process_upload("a.pdf", make_pdf())
+    review.approve(first.candidate.id, reviewer_label="Reviewer A")
+    again = intake.retry_extraction("a.pdf", make_pdf())
+    assert again.candidate.status is CandidateStatus.APPROVED
+
+
+def test_retry_of_an_unknown_document_is_refused_and_creates_nothing(intake, database):
+    result = intake.retry_extraction("a.pdf", make_pdf())
+    assert result.outcome is IntakeOutcome.REJECTED
+    assert result.rejection_code == "unknown_document"
+    snapshot = database.metrics_snapshot()
+    assert (snapshot["sources"], snapshot["attempts"]) == (0, 0)
+
+
+def test_retry_still_applies_the_file_security_checks(intake, database):
+    result = intake.retry_extraction("a.pdf", malformed_pdf())
+    assert result.outcome is IntakeOutcome.REJECTED
+    assert result.rejection_code == "unreadable_pdf"
+    assert database.metrics_snapshot()["attempts"] == 0
+
+
+def test_retry_does_not_count_as_a_content_duplicate_observation(database):
+    service, _ = flaky_service(database, failures=1)
+    service.process_upload("a.pdf", make_pdf())
+    service.retry_extraction("a.pdf", make_pdf())
+    snapshot = database.metrics_snapshot()
+    assert snapshot["content_duplicates"] == 0
+    assert (snapshot["sources"], snapshot["attempts"], snapshot["retry_attempts"]) == (1, 2, 1)
+
+
+def test_retried_candidate_goes_through_duplicate_detection_and_records_initial_status(database):
+    service, _ = flaky_service(database, failures=1)
+    first = IntakeService(database, DeterministicExtractor(), today_provider=lambda: TODAY)
+    original = first.process_upload("a.pdf", make_pdf()).candidate
+    service.process_upload("b.pdf", make_pdf(extra=["Note: second copy"]))
+    retried = service.retry_extraction("b.pdf", make_pdf(extra=["Note: second copy"])).candidate
+    assert retried.status is CandidateStatus.REVIEW_REQUIRED
+    assert retried.initial_status is CandidateStatus.REVIEW_REQUIRED
+    flag = [i for i in retried.issues if i.code is IssueCode.POSSIBLE_LOGICAL_DUPLICATE]
+    assert flag[0].candidate_ids == [original.id]
+
+
+def test_extractor_exception_during_retry_is_recorded_generically(database):
+    class FailsThenExplodes:
+        def __init__(self):
+            self.calls = 0
+
+        def extract(self, pdf_bytes):
+            self.calls += 1
+            if self.calls == 1:
+                return ExtractionResult(method="deterministic", error_code="extraction_failed")
+            raise RuntimeError("secret internal detail")
+
+    service = IntakeService(database, FailsThenExplodes(), today_provider=lambda: TODAY)
+    service.process_upload("a.pdf", make_pdf())
+    result = service.retry_extraction("a.pdf", make_pdf())
+    assert result.error_code == "extraction_failed"
+    assert "secret" not in repr(result)
+    assert database.metrics_snapshot()["attempts"] == 2
+
+
+def test_new_candidates_record_their_initial_routing(intake):
+    clean = intake.process_upload("a.pdf", make_pdf()).candidate
+    flagged = intake.process_upload(
+        "b.pdf", make_pdf({"Invoice Number": "INV-DEMO-0002", "Subtotal": "1,0000"})
+    ).candidate
+    assert clean.initial_status is CandidateStatus.AUTO_READY
+    assert flagged.initial_status is CandidateStatus.REVIEW_REQUIRED
 
 
 def test_different_bytes_with_same_logical_invoice_get_blocking_duplicate_issue(intake):

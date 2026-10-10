@@ -62,9 +62,16 @@ def render() -> None:
         st.caption("Nothing uploaded yet.")
         return
     processed: dict = st.session_state.setdefault("processed_uploads", {})
+    services = helpers.get_services()
     if uploaded.file_id not in processed:
-        services = helpers.get_services()
         processed[uploaded.file_id] = services.intake.process_upload(
             uploaded.name, uploaded.getvalue()
         )
-    _show_result(processed[uploaded.file_id])
+    result = processed[uploaded.file_id]
+    _show_result(result)
+    # Retry is always an explicit click; nothing re-extracts on its own.
+    if result.retryable and st.button("Retry extraction", key="retry_extraction"):
+        processed[uploaded.file_id] = services.intake.retry_extraction(
+            uploaded.name, uploaded.getvalue()
+        )
+        st.rerun()

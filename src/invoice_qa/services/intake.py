@@ -1,4 +1,4 @@
-"""Upload use case: file checks, one extraction attempt per unique content, routing."""
+"""Upload use case: file checks, extraction attempts (retry only on request), routing."""
 
 from collections.abc import Callable
 from datetime import date
@@ -7,8 +7,10 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 from invoice_qa.domain.models import (
+    AttemptRecord,
     AttemptStatus,
     InvoiceCandidate,
+    SourceDocumentRecord,
 )
 from invoice_qa.domain.normalization import normalize_invoice
 from invoice_qa.domain.transitions import derive_candidate_status
@@ -18,7 +20,7 @@ from invoice_qa.domain.validation import (
     validate_invoice,
 )
 from invoice_qa.extraction.base import ExtractionResult, Extractor
-from invoice_qa.infrastructure.database import Database
+from invoice_qa.infrastructure.database import Database, RetryNotAllowed
 from invoice_qa.infrastructure.file_security import (
     UploadRejected,
     safe_display_filename,
@@ -40,6 +42,7 @@ class IntakeResult(BaseModel):
     content_duplicate: bool = False
     rejection_code: str | None = None
     error_code: str | None = None
+    retryable: bool = False
     source_document_id: str | None = None
     display_filename: str | None = None
     candidate: InvoiceCandidate | None = None
@@ -57,7 +60,12 @@ class IntakeService:
         self._extractor = extractor
         self._today = today_provider
 
+    @property
+    def _method(self) -> str:
+        return getattr(self._extractor, "method", "deterministic")
+
     def process_upload(self, filename: str, content: bytes) -> IntakeResult:
+        """New content is extracted once; known content never triggers a new attempt."""
         try:
             validate_pdf_upload(filename, content)
         except UploadRejected as rejection:
@@ -71,18 +79,43 @@ class IntakeService:
             self._db.record_duplicate_observation(source.id)
             return self._existing_result(source.id, source.display_filename)
 
-        method = getattr(self._extractor, "method", "deterministic")
-        attempt = self._db.create_attempt(source.id, method)
+        attempt = self._db.create_attempt(source.id, self._method)
+        return self._run_attempt(source, attempt, content)
+
+    def retry_extraction(self, filename: str, content: bytes) -> IntakeResult:
+        """Explicit user action: re-extract a source whose latest attempt did not succeed.
+
+        Content is never stored, so the caller supplies the same bytes again. Every earlier
+        attempt is preserved. A source that already has a candidate just returns it.
+        """
+        try:
+            validate_pdf_upload(filename, content)
+        except UploadRejected as rejection:
+            return IntakeResult(outcome=IntakeOutcome.REJECTED, rejection_code=rejection.code)
+
+        source = self._db.get_source_document_by_sha256(sha256_bytes(content))
+        if source is None:
+            return IntakeResult(outcome=IntakeOutcome.REJECTED, rejection_code="unknown_document")
+        try:
+            attempt = self._db.retry_attempt(source.id, self._method)
+        except RetryNotAllowed:
+            return self._existing_result(source.id, source.display_filename)
+        return self._run_attempt(source, attempt, content)
+
+    def _run_attempt(
+        self, source: SourceDocumentRecord, attempt: AttemptRecord, content: bytes
+    ) -> IntakeResult:
         try:
             extraction = self._extractor.extract(content)
         except Exception:
-            extraction = ExtractionResult(method=method, error_code="extraction_failed")
+            extraction = ExtractionResult(method=self._method, error_code="extraction_failed")
         if extraction.error_code is not None or extraction.raw is None:
             error_code = extraction.error_code or "extraction_failed"
             self._db.finish_attempt_error(attempt.id, error_code)
             return IntakeResult(
                 outcome=IntakeOutcome.EXTRACTION_ERROR,
                 error_code=error_code,
+                retryable=True,
                 source_document_id=source.id,
                 display_filename=source.display_filename,
             )
@@ -135,9 +168,16 @@ class IntakeService:
                 return IntakeResult(outcome=IntakeOutcome.CANDIDATE, candidate=candidate, **base)
         if attempt is not None and attempt.status is AttemptStatus.ERROR:
             return IntakeResult(
-                outcome=IntakeOutcome.EXTRACTION_ERROR, error_code=attempt.error_code, **base
+                outcome=IntakeOutcome.EXTRACTION_ERROR,
+                error_code=attempt.error_code,
+                retryable=True,
+                **base,
             )
-        # A stranded ``started`` attempt (or a success without candidate) is never retried.
+        # A stranded ``started`` attempt (or a source that never started one) is reported as
+        # interrupted; only an explicit ``retry_extraction`` starts another attempt.
         return IntakeResult(
-            outcome=IntakeOutcome.EXTRACTION_ERROR, error_code="extraction_interrupted", **base
+            outcome=IntakeOutcome.EXTRACTION_ERROR,
+            error_code="extraction_interrupted",
+            retryable=True,
+            **base,
         )
