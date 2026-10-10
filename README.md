@@ -36,6 +36,16 @@ Synthetic PDF -> file-security checks -> deterministic text extraction -> raw fi
   -> approve / reject -> approved CSV/JSON export -> append-only audit history + metrics
 ```
 
+### Demo screenshots
+
+| Clean invoice upload | Explicit extraction retry |
+|---|---|
+| ![Clean invoice routed to auto-ready](screenshots/01-upload-clean-invoice.png) | ![Unreadable PDF offers an explicit retry](screenshots/03-extraction-error-with-retry.png) |
+
+| Human review queue | Operational and evaluation metrics |
+|---|---|
+| ![Review queue with masked tax IDs](screenshots/05-review-queue.png) | ![Operational and synthetic evaluation metrics](screenshots/08-metrics.png) |
+
 ## 5. Features
 
 - Upload, Review Queue, Metrics and About pages.
@@ -208,4 +218,4 @@ advice; confirm licenses before redistribution.
 
 ## 16. Project license status
 
-Project license: not yet selected.
+Licensed under the [MIT License](LICENSE).
