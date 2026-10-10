@@ -3,11 +3,16 @@
 Synthetic-data portfolio MVP. Not production software. Nothing was pushed, published or
 deployed; the repository has no remote.
 
-- **Code-baseline commit** (last code commit, before the documentation commit): `c8b89c3`
+- **Code-baseline commit** (last code commit, before the documentation commit): `04bf562`
+  (follow-up: explicit retry and split review-rate metrics; the original evaluation commit
+  was `c8b89c3`)
 - The final documentation commit SHA is reported outside this file after committing.
-- Verified with Python 3.14.x on Windows 11. `requires-python` is `>=3.11`; Ruff targets `py311`;
-  all sources parse with the 3.11 grammar. No 3.11 interpreter was available, so the suite has
-  **not** been executed on 3.11.
+- Verified with Python 3.14.x (primary `.venv`) and 3.12.13 (separate out-of-repo venv) on
+  Windows 11. `requires-python` is `>=3.11`; Ruff targets `py311`; all sources parse with the
+  3.11 grammar. **Blocker: no Python 3.11 interpreter is installed, and installing one needs a
+  download outside the allowed network scope (PyPI + official docs), so the suite has NOT been
+  executed on 3.11.** To resolve: `uv python install 3.11`, `uv venv --python 3.11 <dir>`,
+  install `-e ".[dev]"` and run `pytest -q`.
 - Pinned/resolved versions used: streamlit 1.65.0, pypdf 6.20.0, reportlab 5.0.1 (exact pin),
   pydantic 2.14.0, pandas 3.0.6, pytest 9.1.1, ruff 0.16.10.
 
@@ -19,10 +24,23 @@ deterministic extraction, AI protocol + validation boundary + test-only fake pro
 storage with append-only/immutability triggers; intake, review, metrics and export services;
 four-page Streamlit UI; reproducible 13-scenario evaluation; README, SECURITY.md.
 
+Follow-up (commit `04bf562`, requested after the original run): explicit extraction retry
+(several immutable numbered attempts per source, in-place upgrade of older databases, a
+**Retry extraction** button) and `initial_review_rate` vs. `current_review_backlog_share`
+(initial routing persisted on each candidate).
+
+## Deviation from the plan (intentional, requested by the project owner)
+
+The plan file (`docs/superpowers/plans/...-v2.md`, not edited) states that retry is out of scope
+and that each source has exactly one attempt (lines 35, 48, 280, 333, 507, 1471, and the
+`UNIQUE(source_document_id)` test at ~925). The follow-up request overrode that, so the
+implementation now **differs from the plan** on exactly this point; README, About page and tests
+describe the new behaviour. The plan was not changed to match.
+
 ## Omitted scope (by design)
 
-Real model/API client, extraction retry, amount rounding, email ingestion, ERP/payment
-integrations, authentication, OCR, reopen of terminal candidates, counting security-rejected
+Real model/API client, automatic extraction retry/backoff, amount rounding, email ingestion,
+ERP/payment integrations, authentication, OCR, reopen of terminal candidates, counting security-rejected
 uploads in persisted metrics, screenshots.
 
 ## Exact commands run (from the repository root, inside `.venv`)
@@ -36,12 +54,16 @@ python sample_data/generate_samples.py
 python scripts/evaluate.py --manifest sample_data/manifest.json --output .evaluation/report.json
 git diff --check
 git status --short
+# follow-up only: the same suite on Python 3.12 from a venv kept outside the repository
+uv venv <outside-repo-dir>/venv312 --python 3.12
+uv pip install --python <outside-repo-dir>/venv312/Scripts/python.exe -e ".[dev]"
+<outside-repo-dir>/venv312/Scripts/python.exe -m pytest -q
 ```
 
 ## Results
 
 - `ruff check .`: all checks passed.
-- `pytest -q`: **271 passed**, 0 failed, 0 skipped.
+- `pytest -q`: **308 passed**, 0 failed, 0 skipped on Python 3.14; **308 passed** on 3.12.13.
 - `git diff --check`: no output (clean).
 - Generator: 13 PDFs written to `sample_data/generated/` (gitignored); two generations had
   identical SHA-256 per fixture (pinned by `tests/test_sample_data.py`).
@@ -51,7 +73,7 @@ git status --short
 |---|---|
 | Scenarios matching manifest | 13 / 13 |
 | Field accuracy | 111 / 111 |
-| Review rate | 0.7500 (9 of 12 new candidates) |
+| Initial review rate | 0.7500 (9 of 12 new candidates) |
 | False auto-ready | 0 |
 | False review | 0 |
 
@@ -62,7 +84,7 @@ with the rules, so they do not indicate real-world accuracy.
 
 | README claim | Evidence |
 |---|---|
-| 13/13 scenarios, 111/111 fields, review rate 0.75, 0 false auto-ready, 0 false review | `scripts/evaluate.py` output above; `.evaluation/report.json` (gitignored) |
+| 13/13 scenarios, 111/111 fields, initial review rate 0.75, 0 false auto-ready, 0 false review | `scripts/evaluate.py` output above; `.evaluation/report.json` (gitignored) |
 | 13 fixtures, byte-reproducible | `tests/test_sample_data.py::test_two_generations_have_identical_hashes` |
 | 5 MiB accepted / +1 byte rejected, oversized rejected before parsing | `tests/test_file_security.py`, `tests/test_project_config.py`, `tests/test_app.py::test_upload_control_renders_for_pdf_input` |
 | Overall-confidence warning fires rarely (worked examples 9642 / 8571 / 8428) | `tests/test_domain.py::test_worked_confidence_examples` |
@@ -86,12 +108,29 @@ with the rules, so they do not indicate real-world accuracy.
    run instructions); an independent review is still required.
 7. The Task 5 and Task 7 commits were amended locally (unpushed): Task 5 to include a lint
    fix, Task 7 to replace a hostile-filename test vector that looked like an absolute path.
+8. **Retry (follow-up, overrides the plan):** retry needs the file again because PDF bytes are
+   never stored. A retry of a stranded `started` attempt marks it `extraction_interrupted`
+   (preserved) before starting the next one. A source that crashed before its first attempt
+   starts attempt 1 on retry. A succeeded source never gets another attempt (DB trigger +
+   partial unique indexes); retrying it just returns its candidate. Cost if wrong: two sessions
+   retrying the same document at once interrupt each other's attempt.
+9. **Initial routing (follow-up):** `candidates.initial_status` is immutable (trigger). Rows
+   from before this column existed keep `NULL` (their routing was never recorded and is not
+   guessed) and are excluded from `initial_review_rate`; `metrics` reports their count as
+   `initial_routing_unknown`. The old `review_rate` key is removed everywhere, including the
+   evaluator report (now `initial_review_rate`). Cost if wrong: external readers of the old key.
+10. **Schema upgrade (follow-up):** databases created by the one-attempt schema are rebuilt in
+    place in one transaction (SQLite's documented table-rebuild procedure, foreign keys off,
+    `foreign_key_check` before commit, rollback on any failure). Verified on a legacy-schema
+    fixture only; there is no real legacy database to test against.
 
 ## Known bugs and limitations
 
-- See README section 13. In addition: AppTest cannot simulate file uploads, so upload flows are
-  tested at the service layer; the Streamlit page itself was only exercised through AppTest,
-  not manually in a browser.
+- See README section 13. In addition: the Streamlit pages were exercised through AppTest only
+  (including uploads and the retry button), never manually in a browser. An earlier version of
+  this file said AppTest cannot simulate uploads; that was wrong for Streamlit 1.65
+  (`FileUploader.set_value`) and the UI tests now upload real PDFs.
+- Python 3.11 was not available (see the header); only 3.14 and 3.12 were run.
 - Streamlit sessions share one SQLite file; concurrent writers are serialized by SQLite
   (`BEGIN IMMEDIATE`) but there is no conflict UX.
 - Line endings: Git on this machine warns that LF will become CRLF in the working copy
