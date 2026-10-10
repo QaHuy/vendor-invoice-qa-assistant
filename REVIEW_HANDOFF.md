@@ -3,16 +3,14 @@
 Synthetic-data portfolio MVP. Not production software. Nothing was pushed, published or
 deployed; the repository has no remote.
 
-- **Code-baseline commit** (last code commit, before the documentation commit): `04bf562`
-  (follow-up: explicit retry and split review-rate metrics; the original evaluation commit
-  was `c8b89c3`)
-- The final documentation commit SHA is reported outside this file after committing.
-- Verified with Python 3.14.x (primary `.venv`) and 3.12.13 (separate out-of-repo venv) on
-  Windows 11. `requires-python` is `>=3.11`; Ruff targets `py311`; all sources parse with the
-  3.11 grammar. **Blocker: no Python 3.11 interpreter is installed, and installing one needs a
-  download outside the allowed network scope (PyPI + official docs), so the suite has NOT been
-  executed on 3.11.** To resolve: `uv python install 3.11`, `uv venv --python 3.11 <dir>`,
-  install `-e ".[dev]"` and run `pytest -q`.
+- **Baselines:** original evaluation commit `c8b89c3`; retry + metrics split `04bf562`
+  (documented by `a80f153`); retry-integrity fixes (atomic success, no early interruption,
+  recovery, no-text sample) are in the commit that follows `a80f153`. The final commit SHA is
+  reported outside this file after committing.
+- Verified with Python **3.14.6** (primary `.venv`) and **3.11.15** (uv-managed, installed with
+  `uv python install 3.11 --no-bin --no-registry`, venv kept outside the repository) on
+  Windows 11. `requires-python` is `>=3.11`; Ruff targets `py311`. An earlier run of the
+  previous revision on 3.12.13 is not repeated here.
 - Pinned/resolved versions used: streamlit 1.65.0, pypdf 6.20.0, reportlab 5.0.1 (exact pin),
   pydantic 2.14.0, pandas 3.0.6, pytest 9.1.1, ruff 0.16.10.
 
@@ -28,6 +26,14 @@ Follow-up (commit `04bf562`, requested after the original run): explicit extract
 (several immutable numbered attempts per source, in-place upgrade of older databases, a
 **Retry extraction** button) and `initial_review_rate` vs. `current_review_backlog_share`
 (initial routing persisted on each candidate).
+
+Second follow-up (retry integrity): `Database.complete_attempt_with_candidate()` stores the
+successful extraction and creates the candidate (with its immutable `initial_status`) in one
+transaction, replacing the old two-step `finish_attempt_success` + `create_candidate`;
+`retry_attempt()` refuses to touch a `started` attempt younger than `STALE_ATTEMPT_AFTER`
+(10 minutes, injected clock) and the UI shows a generic "already in progress" message; a
+succeeded attempt without a candidate is repaired from its stored raw evidence; the sample
+generator writes `retry-demo-no-text.pdf`.
 
 ## Deviation from the plan (intentional, requested by the project owner)
 
@@ -54,20 +60,25 @@ python sample_data/generate_samples.py
 python scripts/evaluate.py --manifest sample_data/manifest.json --output .evaluation/report.json
 git diff --check
 git status --short
-# follow-up only: the same suite on Python 3.12 from a venv kept outside the repository
-uv venv <outside-repo-dir>/venv312 --python 3.12
-uv pip install --python <outside-repo-dir>/venv312/Scripts/python.exe -e ".[dev]"
-<outside-repo-dir>/venv312/Scripts/python.exe -m pytest -q
+# second follow-up: isolated Python 3.11 (no PATH, default-Python or registry change)
+uv python install 3.11 --no-bin --no-registry
+uv venv <outside-repo-dir>/venv311 --python 3.11
+uv pip install --python <outside-repo-dir>/venv311/Scripts/python.exe -e ".[dev]"
+<outside-repo-dir>/venv311/Scripts/python.exe -m pytest -q
+<outside-repo-dir>/venv311/Scripts/ruff.exe check .
+<outside-repo-dir>/venv311/Scripts/python.exe scripts/evaluate.py --manifest sample_data/manifest.json --output .evaluation/report.json
 ```
 
 ## Results
 
-- `ruff check .`: all checks passed.
-- `pytest -q`: **308 passed**, 0 failed, 0 skipped on Python 3.14; **308 passed** on 3.12.13.
+- `ruff check .`: all checks passed on both interpreters.
+- `pytest -q`: **334 passed**, 0 failed, 0 skipped on Python 3.14.6; **334 passed** on 3.11.15.
 - `git diff --check`: no output (clean).
-- Generator: 13 PDFs written to `sample_data/generated/` (gitignored); two generations had
-  identical SHA-256 per fixture (pinned by `tests/test_sample_data.py`).
-- Evaluator exit code 0:
+- Generator: 14 PDFs (13 fixtures + `retry-demo-no-text.pdf`) written to
+  `sample_data/generated/` (gitignored); two generations had identical bytes per file (pinned
+  by `tests/test_sample_data.py`), and the 3.11 and 3.14 outputs were byte-identical (checked
+  once with `cmp`, not pinned by a test).
+- Evaluator exit code 0 on both 3.11.15 and 3.14.6, identical result:
 
 | Metric | Result |
 |---|---|
@@ -109,11 +120,11 @@ with the rules, so they do not indicate real-world accuracy.
 7. The Task 5 and Task 7 commits were amended locally (unpushed): Task 5 to include a lint
    fix, Task 7 to replace a hostile-filename test vector that looked like an absolute path.
 8. **Retry (follow-up, overrides the plan):** retry needs the file again because PDF bytes are
-   never stored. A retry of a stranded `started` attempt marks it `extraction_interrupted`
-   (preserved) before starting the next one. A source that crashed before its first attempt
-   starts attempt 1 on retry. A succeeded source never gets another attempt (DB trigger +
-   partial unique indexes); retrying it just returns its candidate. Cost if wrong: two sessions
-   retrying the same document at once interrupt each other's attempt.
+   never stored. A retry of a *stale* `started` attempt marks it `extraction_interrupted`
+   (preserved) before starting the next one; a recent one returns `attempt_in_progress` and is
+   not modified (ruling 11). A source that crashed before its first attempt starts attempt 1 on
+   retry. A succeeded source never gets another attempt (DB trigger + partial unique indexes);
+   retrying it just returns its candidate.
 9. **Initial routing (follow-up):** `candidates.initial_status` is immutable (trigger). Rows
    from before this column existed keep `NULL` (their routing was never recorded and is not
    guessed) and are excluded from `initial_review_rate`; `metrics` reports their count as
@@ -124,15 +135,42 @@ with the rules, so they do not indicate real-world accuracy.
     `foreign_key_check` before commit, rollback on any failure). Verified on a legacy-schema
     fixture only; there is no real legacy database to test against.
 
+11. **Stale-attempt threshold (second follow-up):** `STALE_ATTEMPT_AFTER = 10 minutes`, a
+    boundary-inclusive comparison against the injected database clock, configurable per
+    `Database`. Chosen conservatively because a size-capped deterministic extraction takes
+    seconds; it is not measured. Cost if wrong: a crashed attempt blocks retry for up to 10
+    minutes, or an extraction slower than 10 minutes could be interrupted.
+12. **Atomic success (second follow-up):** the public two-step `finish_attempt_success` and
+    `create_candidate` were removed so the split cannot be reintroduced by a caller; validation
+    and duplicate lookup still run before the transaction, so a concurrent logical duplicate
+    created between lookup and commit is not seen (unchanged from before). If the transaction
+    fails for any reason the attempt is recorded as an error with the safe code
+    `candidate_creation_failed` and is retryable. Cost if wrong: a failure inside the
+    transaction is reported generically and the exception detail is discarded.
+13. **Recovery of an orphaned success (second follow-up):** automatic on the next upload or
+    retry of that file (no PDF needed, no new attempt), rebuilding the candidate from the stored
+    `raw_json`, confidence and conflicts. Validation uses the date and duplicates at recovery
+    time, so the recovered status can differ from what the original run would have produced.
+    No real orphan data exists; recovery is verified on a synthetic orphan only.
+14. **Sample generator (second follow-up):** `retry-demo-no-text.pdf` is built by
+    `invoice_qa.synthetic.build_no_text_pdf()` and written by `generate_samples.py` but is not
+    in `manifest.json`, so the evaluator stays at 13 scenarios.
+
 ## Known bugs and limitations
 
 - See README section 13. In addition: the Streamlit pages were exercised through AppTest only
   (including uploads and the retry button), never manually in a browser. An earlier version of
   this file said AppTest cannot simulate uploads; that was wrong for Streamlit 1.65
   (`FileUploader.set_value`) and the UI tests now upload real PDFs.
-- Python 3.11 was not available (see the header); only 3.14 and 3.12 were run.
+- The suite was run on 3.14.6 and 3.11.15 only (not 3.12/3.13 for this revision).
 - Streamlit sessions share one SQLite file; concurrent writers are serialized by SQLite
-  (`BEGIN IMMEDIATE`) but there is no conflict UX.
+  (`BEGIN IMMEDIATE`). The concurrency test uses two `Database`/`IntakeService` instances and
+  two threads on one file, not two browser sessions.
+- The "already in progress" message is cached per uploaded file in a session; the user must
+  remove and re-upload the file to see the result (a refresh button was not added).
+- The retry-integrity fixes were reviewed only by the implementing agent; the independent
+  reviewer's findings were the input to this change, and no new independent review of these
+  fixes has been done.
 - Line endings: Git on this machine warns that LF will become CRLF in the working copy
   (`core.autocrlf`); stored content is unaffected.
 

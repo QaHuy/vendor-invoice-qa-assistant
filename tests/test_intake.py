@@ -1,11 +1,14 @@
+import json
+import threading
 from datetime import date
 
-from conftest import TODAY
+from conftest import FIXED_NOW, TODAY
 from factories import encrypted_pdf, make_pdf, malformed_pdf, no_text_pdf
 from fakes import flaky_service
 from invoice_qa.domain.models import AttemptStatus, CandidateStatus, IssueCode
 from invoice_qa.extraction.base import ExtractionResult
 from invoice_qa.extraction.deterministic import DeterministicExtractor
+from invoice_qa.infrastructure.database import STALE_ATTEMPT_AFTER, Database
 from invoice_qa.infrastructure.file_security import sha256_bytes
 from invoice_qa.services.intake import IntakeOutcome, IntakeService
 
@@ -121,18 +124,20 @@ def test_content_duplicate_of_failed_source_returns_recorded_error(intake, datab
     assert first.source_document_id == second.source_document_id
 
 
-def test_stranded_started_attempt_is_reported_as_interrupted_and_not_retried_implicitly(
-    intake, database
+def test_stale_started_attempt_is_reported_as_interrupted_and_not_retried_implicitly(
+    intake, database, clock
 ):
     pdf = make_pdf()
     source, _ = database.get_or_create_source_document(sha256_bytes(pdf), "invoice.pdf", len(pdf))
     database.create_attempt(source.id, "deterministic")
+    clock.advance(seconds=STALE_ATTEMPT_AFTER.total_seconds())
     result = intake.process_upload("invoice.pdf", pdf)
     assert result.outcome is IntakeOutcome.EXTRACTION_ERROR
     assert result.error_code == "extraction_interrupted"
     assert result.retryable
     assert database.list_candidates() == []
-    assert len(database.list_attempts_for_source(source.id)) == 1
+    attempts = database.list_attempts_for_source(source.id)
+    assert [a.status for a in attempts] == [AttemptStatus.STARTED]
 
 
 # ------------------------------------------------------------------ explicit retry
@@ -180,10 +185,11 @@ def test_retry_that_fails_again_keeps_both_failed_attempts(database):
     assert len(database.list_attempts_for_source(first.source_document_id)) == 3
 
 
-def test_retry_of_a_stranded_attempt_preserves_it_and_can_succeed(intake, database):
+def test_retry_of_a_stale_attempt_preserves_it_and_can_succeed(intake, database, clock):
     pdf = make_pdf()
     source, _ = database.get_or_create_source_document(sha256_bytes(pdf), "invoice.pdf", len(pdf))
     database.create_attempt(source.id, "deterministic")
+    clock.advance(seconds=STALE_ATTEMPT_AFTER.total_seconds())
     result = intake.retry_extraction("invoice.pdf", pdf)
     assert result.outcome is IntakeOutcome.CANDIDATE
     attempts = database.list_attempts_for_source(source.id)
@@ -300,3 +306,195 @@ def test_pdf_bytes_and_free_text_are_never_persisted(intake, db_path):
     stored = db_path.read_bytes()
     assert b"%PDF-" not in stored
     assert b"do-not-store-this-text" not in stored
+
+
+# ------------------------------------------------ atomic success and recovery of orphaned success
+
+
+def test_a_failed_candidate_insert_leaves_no_succeeded_attempt_and_can_be_retried(
+    database, monkeypatch
+):
+    service = IntakeService(database, DeterministicExtractor(), today_provider=lambda: TODAY)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("injected failure with secret detail")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(database, "_insert_candidate", explode)
+        result = service.process_upload("a.pdf", make_pdf())
+    assert result.outcome is IntakeOutcome.EXTRACTION_ERROR
+    assert result.error_code == "candidate_creation_failed" and result.retryable
+    assert "secret" not in repr(result)
+    attempts = database.list_attempts_for_source(result.source_document_id)
+    assert [(a.status, a.error_code, a.raw) for a in attempts] == [
+        (AttemptStatus.ERROR, "candidate_creation_failed", None)
+    ]
+    assert database.list_candidates() == []
+
+    retried = service.retry_extraction("a.pdf", make_pdf())
+    assert retried.outcome is IntakeOutcome.CANDIDATE
+    assert [a.status for a in database.list_attempts_for_source(result.source_document_id)] == [
+        AttemptStatus.ERROR,
+        AttemptStatus.SUCCEEDED,
+    ]
+
+
+def strand_succeeded_attempt(database, pdf):
+    """The pre-fix crash window: a succeeded attempt with stored evidence but no candidate."""
+    extraction = DeterministicExtractor().extract(pdf)
+    source, _ = database.get_or_create_source_document(sha256_bytes(pdf), "a.pdf", len(pdf))
+    attempt = database.create_attempt(source.id, "deterministic")
+    with database.connect() as connection:
+        connection.execute(
+            "UPDATE extraction_attempts SET status = 'succeeded', raw_json = ?, "
+            "field_confidence_json = ?, conflicts_json = '[]', finished_at = ? WHERE id = ?",
+            (
+                json.dumps(extraction.raw.to_json_dict()),
+                json.dumps(extraction.field_confidence_bps),
+                FIXED_NOW.isoformat(),
+                attempt.id,
+            ),
+        )
+    return source.id, database.get_attempt_for_source(source.id)
+
+
+def test_reupload_recovers_a_succeeded_attempt_without_a_candidate_from_stored_evidence(database):
+    source_id, attempt = strand_succeeded_attempt(database, make_pdf())
+    assert database.get_candidate_for_attempt(attempt.id) is None
+    extractor_calls = []
+
+    class Spy:
+        def extract(self, pdf_bytes):
+            extractor_calls.append(1)
+            raise AssertionError("recovery must not re-extract the PDF")
+
+    service = IntakeService(database, Spy(), today_provider=lambda: TODAY)
+    result = service.process_upload("a.pdf", make_pdf())
+    assert result.outcome is IntakeOutcome.CANDIDATE and result.content_duplicate
+    assert not result.retryable
+    assert result.candidate.attempt_id == attempt.id
+    assert result.candidate.original_raw == attempt.raw
+    assert result.candidate.original_field_confidence_bps == attempt.field_confidence_bps
+    assert result.candidate.initial_status is result.candidate.status
+    assert extractor_calls == []
+    assert len(database.list_attempts_for_source(source_id)) == 1
+    again = service.process_upload("a.pdf", make_pdf())
+    assert again.candidate.id == result.candidate.id
+    assert len(database.list_candidates()) == 1
+
+
+def test_retry_recovers_a_succeeded_attempt_without_a_candidate_instead_of_refusing(database):
+    _, attempt = strand_succeeded_attempt(database, make_pdf())
+    service = IntakeService(database, DeterministicExtractor(), today_provider=lambda: TODAY)
+    result = service.retry_extraction("a.pdf", make_pdf())
+    assert result.outcome is IntakeOutcome.CANDIDATE
+    assert result.candidate.attempt_id == attempt.id
+    assert database.metrics_snapshot()["attempts"] == 1
+
+
+def test_recovered_candidate_goes_through_validation_and_duplicate_detection(database):
+    service = IntakeService(database, DeterministicExtractor(), today_provider=lambda: TODAY)
+    original = service.process_upload("first.pdf", make_pdf()).candidate
+    _, attempt = strand_succeeded_attempt(database, make_pdf(extra=["Note: second copy"]))
+    recovered = service.retry_extraction("b.pdf", make_pdf(extra=["Note: second copy"])).candidate
+    assert recovered.status is CandidateStatus.REVIEW_REQUIRED
+    flag = [i for i in recovered.issues if i.code is IssueCode.POSSIBLE_LOGICAL_DUPLICATE]
+    assert flag[0].candidate_ids == [original.id]
+
+
+# --------------------------------------------------- an active attempt is never interrupted
+
+
+def test_reupload_while_an_attempt_is_running_reports_in_progress_and_changes_nothing(
+    intake, database, clock
+):
+    pdf = make_pdf()
+    source, _ = database.get_or_create_source_document(sha256_bytes(pdf), "invoice.pdf", len(pdf))
+    running = database.create_attempt(source.id, "deterministic")
+    clock.advance(seconds=STALE_ATTEMPT_AFTER.total_seconds() - 1)
+    result = intake.process_upload("invoice.pdf", pdf)
+    assert result.outcome is IntakeOutcome.IN_PROGRESS
+    assert result.error_code == "attempt_in_progress" and not result.retryable
+    assert result.candidate is None
+    attempts = database.list_attempts_for_source(source.id)
+    assert [(a.id, a.status) for a in attempts] == [(running.id, AttemptStatus.STARTED)]
+
+
+def test_retry_while_an_attempt_is_running_reports_in_progress_and_changes_nothing(
+    intake, database, clock
+):
+    pdf = make_pdf()
+    source, _ = database.get_or_create_source_document(sha256_bytes(pdf), "invoice.pdf", len(pdf))
+    running = database.create_attempt(source.id, "deterministic")
+    result = intake.retry_extraction("invoice.pdf", pdf)
+    assert result.outcome is IntakeOutcome.IN_PROGRESS and not result.retryable
+    attempts = database.list_attempts_for_source(source.id)
+    assert [(a.id, a.status, a.error_code) for a in attempts] == [
+        (running.id, AttemptStatus.STARTED, None)
+    ]
+
+
+def test_two_sessions_retrying_at_once_do_not_interrupt_each_other(db_path, clock):
+    entered, release = threading.Event(), threading.Event()
+    calls = {"a": 0, "b": 0}
+
+    class SessionAExtractor:
+        """Fails once, then blocks inside the second extraction until released."""
+
+        method = "deterministic"
+
+        def __init__(self):
+            self._real = DeterministicExtractor()
+
+        def extract(self, pdf_bytes):
+            calls["a"] += 1
+            if calls["a"] == 1:
+                return ExtractionResult(method=self.method, error_code="extraction_failed")
+            entered.set()
+            assert release.wait(timeout=20)
+            return self._real.extract(pdf_bytes)
+
+    class SessionBExtractor:
+        method = "deterministic"
+
+        def extract(self, pdf_bytes):
+            calls["b"] += 1
+            raise AssertionError("session B must not start an extraction")
+
+    db_a = Database(now_provider=clock)
+    db_a.initialize()
+    db_b = Database(now_provider=clock)
+    session_a = IntakeService(db_a, SessionAExtractor(), today_provider=lambda: TODAY)
+    session_b = IntakeService(db_b, SessionBExtractor(), today_provider=lambda: TODAY)
+
+    pdf = make_pdf()
+    first = session_a.process_upload("a.pdf", pdf)
+    assert first.outcome is IntakeOutcome.EXTRACTION_ERROR
+
+    outcome = {}
+    worker = threading.Thread(
+        target=lambda: outcome.setdefault("a", session_a.retry_extraction("a.pdf", pdf))
+    )
+    worker.start()
+    try:
+        assert entered.wait(timeout=20)
+        blocked_retry = session_b.retry_extraction("a.pdf", pdf)
+        blocked_upload = session_b.process_upload("a.pdf", pdf)
+        mid_flight = db_b.list_attempts_for_source(first.source_document_id)
+    finally:
+        release.set()
+        worker.join(timeout=20)
+
+    assert blocked_retry.outcome is IntakeOutcome.IN_PROGRESS
+    assert blocked_upload.outcome is IntakeOutcome.IN_PROGRESS
+    assert [a.status for a in mid_flight] == [AttemptStatus.ERROR, AttemptStatus.STARTED]
+    assert mid_flight[0].error_code == "extraction_failed"
+    assert calls["b"] == 0
+
+    assert outcome["a"].outcome is IntakeOutcome.CANDIDATE
+    final = db_b.list_attempts_for_source(first.source_document_id)
+    assert [(a.attempt_number, a.status) for a in final] == [
+        (1, AttemptStatus.ERROR),
+        (2, AttemptStatus.SUCCEEDED),
+    ]
+    assert len(db_b.list_candidates()) == 1

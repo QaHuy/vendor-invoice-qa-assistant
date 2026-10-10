@@ -89,6 +89,13 @@ def extraction_error_message(code: str) -> str:
     )
 
 
+def extraction_in_progress_message() -> str:
+    return (
+        "Extraction is already in progress for this document. Wait for it to finish, then "
+        "remove the file and upload it again to see the result."
+    )
+
+
 def review_error_message(code: str) -> str:
     return _REVIEW_MESSAGES.get(code, GENERIC_REVIEW_MESSAGE)
 

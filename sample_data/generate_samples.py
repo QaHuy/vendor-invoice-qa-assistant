@@ -8,15 +8,17 @@ import json
 from pathlib import Path
 
 from invoice_qa.infrastructure.file_security import sha256_bytes
-from invoice_qa.synthetic import fixture_pdf
+from invoice_qa.synthetic import build_no_text_pdf, fixture_pdf
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "sample_data" / "manifest.json"
 DEFAULT_OUTPUT = ROOT / "sample_data" / "generated"
+# Not an evaluation fixture: a PDF without a text layer for the manual retry walkthrough.
+RETRY_DEMO_ID = "retry-demo-no-text"
 
 
 def generate(manifest_path: Path, output_dir: Path) -> dict[str, str]:
-    """Write one PDF per fixture and return {fixture id: SHA-256}."""
+    """Write one PDF per fixture plus the retry-demo PDF; return {file id: SHA-256}."""
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -25,6 +27,9 @@ def generate(manifest_path: Path, output_dir: Path) -> dict[str, str]:
         content = fixture_pdf(fixture)
         (output_dir / f"{fixture['id']}.pdf").write_bytes(content)
         digests[fixture["id"]] = sha256_bytes(content)
+    retry_demo = build_no_text_pdf()
+    (output_dir / f"{RETRY_DEMO_ID}.pdf").write_bytes(retry_demo)
+    digests[RETRY_DEMO_ID] = sha256_bytes(retry_demo)
     return digests
 
 

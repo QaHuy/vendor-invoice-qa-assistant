@@ -46,6 +46,10 @@ Synthetic PDF -> file-security checks -> deterministic text extraction -> raw fi
 - Content-duplicate and logical-duplicate handling. A document that is already known never
   extracts again on its own; after an extraction error the user can choose **Retry extraction**.
   Every attempt (failed, interrupted or successful) is kept as an immutable, numbered row.
+  A successful extraction and its candidate are written in one database transaction, so a
+  succeeded attempt never exists without its candidate. An attempt that is still running
+  (younger than 10 minutes) is never interrupted by a second session; the UI says extraction
+  is already in progress.
 - Metrics separate the **initial review rate** (routing recorded when the candidate was
   created, never rewritten) from the **current review backlog share** (waiting for review now).
 - Approved-only export (CSV/JSON) with masked vendor tax IDs.
@@ -146,7 +150,7 @@ Configuration is read from the process environment only (`.env.example` document
 
 ## 12. Demo walkthrough
 
-1. Run the generator, then start the app.
+1. Run the generator (13 evaluation PDFs plus the no-text retry sample), then start the app.
 2. Upload `sample_data/generated/fx01-clean-usd.pdf`; it routes to `auto_ready`.
 3. Upload `fx06-malformed-amount.pdf`; open the Review Queue, correct `Subtotal` to
    `1,000.00` and watch the status change.
@@ -156,17 +160,27 @@ Configuration is read from the process environment only (`.env.example` document
 7. Open Metrics: **Initial review rate** stays where it was after you approve or reject, while
    **Current review backlog share** falls; run the evaluator command shown there to populate
    evaluation-only numbers.
-8. Extraction retry: upload a PDF with no text layer (for example one made with ReportLab that
-   draws only a shape); the page shows an extraction error and a **Retry extraction** button.
-   Nothing retries until you click it; each click adds an attempt and keeps the failed ones.
+8. Extraction retry: upload `sample_data/generated/retry-demo-no-text.pdf` (written by the
+   generator, a valid PDF with no text layer). The page shows an extraction error and a
+   **Retry extraction** button. Nothing retries until you click it; each click adds a numbered
+   attempt and keeps the failed ones (it fails again here by design, because the file never
+   has text). Metrics then show the failed attempts and retry attempts.
 
 ## 13. Known limitations
 
 - Only the documented label-value format is supported; no OCR, no fuzzy matching.
 - Retry is manual only (no automatic retry, backoff or limit on attempts). The PDF is never
-  stored, so a retry needs the same file uploaded again; a stranded `started` attempt is
-  preserved as `extraction_interrupted` when the user retries. Two sessions retrying the same
-  document at once is not handled gracefully (the later click interrupts the earlier attempt).
+  stored, so a retry needs the same file uploaded again.
+- A `started` attempt younger than 10 minutes (`STALE_ATTEMPT_AFTER` in
+  `infrastructure/database.py`, measured with the injected database clock) is treated as
+  running: a second session gets an "already in progress" result and changes nothing. Only an
+  attempt at least 10 minutes old is preserved as `extraction_interrupted` when the user retries.
+  The threshold is a fixed guess, not derived from measurements; an extraction that really runs
+  longer than that could still be interrupted, and a crashed one blocks retry for up to 10 minutes.
+- A succeeded attempt that has no candidate (only possible from data written before extraction
+  and candidate creation became one transaction) is repaired on the next upload or retry of that
+  file by rebuilding the candidate from the stored raw extraction; the PDF is not re-extracted.
+  The rebuilt candidate is validated against today's date and the current duplicates.
 - A database created before retry existed is upgraded in place on first start; its candidates
   have no recorded initial routing and are excluded from the initial review rate.
 - Uploads rejected by file-security checks are shown to the user but not counted in metrics.
@@ -174,8 +188,8 @@ Configuration is read from the process environment only (`.env.example` document
 - Out of scope: credit notes, multi-rate VAT, withholding tax, rounding adjustments,
   multi-currency invoices, email ingestion, ERP/payment integrations, real AI providers.
 - Fixture byte reproducibility holds only for the pinned ReportLab version.
-- Verified on Python 3.14 locally; the code targets 3.11 (Ruff `py311`, syntax checked for
-  3.11) but was not executed on a 3.11 interpreter.
+- Verified locally on Python 3.14.6 and 3.11.15 (Windows 11, full test suite, Ruff and the
+  evaluator on both). Other platforms and Python 3.12/3.13 for this revision were not run.
 - No screenshots are included.
 
 ## 14. Production hardening (not done)

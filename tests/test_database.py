@@ -1,5 +1,6 @@
+import json
 import sqlite3
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -18,7 +19,7 @@ from invoice_qa.domain.models import (
 from invoice_qa.domain.normalization import normalize_invoice
 from invoice_qa.domain.validation import logical_duplicate_key
 from invoice_qa.infrastructure import database as database_module
-from invoice_qa.infrastructure.database import Database
+from invoice_qa.infrastructure.database import STALE_ATTEMPT_AFTER, Database
 
 FIXED_NOW = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
 
@@ -47,28 +48,32 @@ CONFIDENCE = {
 
 
 @pytest.fixture
-def db(db_path):
-    database = Database(now_provider=lambda: FIXED_NOW)
+def db(db_path, clock):
+    database = Database(now_provider=clock)
     database.initialize()
     return database
+
+
+def complete(db, attempt_id, raw=RAW, status=CandidateStatus.AUTO_READY, issues=None, conflicts=()):
+    """Finish a started attempt and create its candidate in the single atomic database call."""
+    normalized = normalize_invoice(raw).fields
+    return db.complete_attempt_with_candidate(
+        attempt_id,
+        raw=raw,
+        field_confidence_bps=CONFIDENCE,
+        conflicts=list(conflicts),
+        original_normalized=normalized,
+        original_overall_confidence_bps=10000,
+        issues=issues or [],
+        status=status,
+        logical_key=logical_duplicate_key(normalized),
+    )
 
 
 def make_candidate(db, sha="a" * 64, raw=RAW, status=CandidateStatus.AUTO_READY, issues=None):
     source, _ = db.get_or_create_source_document(sha, "invoice.pdf", 1234)
     attempt = db.create_attempt(source.id, "deterministic")
-    db.finish_attempt_success(attempt.id, raw, CONFIDENCE, [])
-    normalized = normalize_invoice(raw).fields
-    return db.create_candidate(
-        attempt_id=attempt.id,
-        original_raw=raw,
-        original_normalized=normalized,
-        original_field_confidence_bps=CONFIDENCE,
-        original_overall_confidence_bps=10000,
-        conflicts=[],
-        issues=issues or [],
-        status=status,
-        logical_key=logical_duplicate_key(normalized),
-    )
+    return complete(db, attempt.id, raw=raw, status=status, issues=issues)
 
 
 def apply_change(db, candidate, **overrides):
@@ -177,17 +182,18 @@ def test_failed_attempts_stay_immutable_after_a_retry(db):
     db.retry_attempt(source.id, "deterministic")
     with pytest.raises(sqlite3.DatabaseError):
         db.finish_attempt_error(first.id, "rewritten")
-    with pytest.raises(sqlite3.DatabaseError):
-        db.finish_attempt_success(first.id, RAW, CONFIDENCE, [])
+    with pytest.raises(database_module.AttemptNotActive):
+        complete(db, first.id)
     with db.connect() as connection:
         with pytest.raises(sqlite3.DatabaseError):
             connection.execute("DELETE FROM extraction_attempts WHERE id = ?", (first.id,))
     assert db.list_attempts_for_source(source.id)[0].error_code == "no_extractable_text"
 
 
-def test_retry_of_a_stranded_started_attempt_preserves_it_as_interrupted(db):
+def test_retry_of_a_stale_started_attempt_preserves_it_as_interrupted(db, clock):
     source, _ = db.get_or_create_source_document("d3" * 32, "a.pdf", 5)
     stranded = db.create_attempt(source.id, "deterministic")
+    clock.advance(seconds=STALE_ATTEMPT_AFTER.total_seconds())
     retry = db.retry_attempt(source.id, "deterministic")
     attempts = db.list_attempts_for_source(source.id)
     assert [a.id for a in attempts] == [stranded.id, retry.id]
@@ -256,10 +262,14 @@ def test_terminal_attempts_are_immutable(db):
     stored = db.get_attempt_for_source(source.id)
     assert stored.status is AttemptStatus.ERROR
     assert stored.error_code == "no_extractable_text"
-    with pytest.raises(sqlite3.DatabaseError):
-        db.finish_attempt_success(attempt.id, RAW, CONFIDENCE, [])
+    with pytest.raises(database_module.AttemptNotActive):
+        complete(db, attempt.id)
     with pytest.raises(sqlite3.DatabaseError):
         db.finish_attempt_error(attempt.id, "other")
+    with db.connect() as connection, pytest.raises(sqlite3.DatabaseError):
+        connection.execute(
+            "UPDATE extraction_attempts SET status = 'succeeded' WHERE id = ?", (attempt.id,)
+        )
     assert db.get_attempt_for_source(source.id).error_code == "no_extractable_text"
 
 
@@ -310,17 +320,8 @@ def test_conflicts_round_trip(db):
     source, _ = db.get_or_create_source_document("1" * 64, "a.pdf", 5)
     attempt = db.create_attempt(source.id, "deterministic")
     conflict = FieldConflict(field_name="total_amount", values=["1", "2"])
-    db.finish_attempt_success(attempt.id, RAW, CONFIDENCE, [conflict])
-    candidate = db.create_candidate(
-        attempt_id=attempt.id,
-        original_raw=RAW,
-        original_normalized=normalize_invoice(RAW).fields,
-        original_field_confidence_bps=CONFIDENCE,
-        original_overall_confidence_bps=10000,
-        conflicts=[conflict],
-        issues=[],
-        status=CandidateStatus.REVIEW_REQUIRED,
-        logical_key=None,
+    candidate = complete(
+        db, attempt.id, status=CandidateStatus.REVIEW_REQUIRED, conflicts=[conflict]
     )
     assert db.get_candidate(candidate.id).conflicts == [conflict]
     assert db.get_attempt_for_source(source.id).conflicts == [conflict]
@@ -514,3 +515,165 @@ def test_candidate_lookup_by_attempt(db):
     candidate = make_candidate(db)
     assert db.get_candidate_for_attempt(candidate.attempt_id) == candidate
     assert db.get_candidate_for_attempt("missing") is None
+
+
+# ----------------------------------------------- atomic success (attempt + candidate together)
+
+
+class _BrokenStatus:
+    """Injected failure: the candidate INSERT violates its status CHECK constraint."""
+
+    value = "not_a_status"
+
+
+def test_a_failed_candidate_insert_rolls_back_the_attempt_success(db):
+    source, _ = db.get_or_create_source_document("f1" * 32, "a.pdf", 5)
+    attempt = db.create_attempt(source.id, "deterministic")
+    with pytest.raises(sqlite3.IntegrityError):
+        complete(db, attempt.id, status=_BrokenStatus())
+    stored = db.get_attempt_for_source(source.id)
+    assert stored.status is AttemptStatus.STARTED
+    assert stored.raw is None and stored.field_confidence_bps == {}
+    assert db.list_candidates() == []
+    assert db.metrics_snapshot()["successful_candidates"] == 0
+
+
+def test_a_failure_inside_candidate_creation_leaves_no_succeeded_attempt(db, monkeypatch):
+    source, _ = db.get_or_create_source_document("f2" * 32, "a.pdf", 5)
+    attempt = db.create_attempt(source.id, "deterministic")
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("injected failure")
+
+    monkeypatch.setattr(db, "_insert_candidate", explode)
+    with pytest.raises(RuntimeError):
+        complete(db, attempt.id)
+    assert db.get_attempt_for_source(source.id).status is AttemptStatus.STARTED
+    assert db.list_candidates() == []
+    with db.connect() as connection:
+        orphans = connection.execute(
+            "SELECT COUNT(*) FROM extraction_attempts a WHERE a.status = 'succeeded' "
+            "AND NOT EXISTS (SELECT 1 FROM candidates c WHERE c.attempt_id = a.id)"
+        ).fetchone()[0]
+    assert orphans == 0
+
+
+def test_success_and_candidate_commit_together_with_initial_status(db):
+    source, _ = db.get_or_create_source_document("f3" * 32, "a.pdf", 5)
+    attempt = db.create_attempt(source.id, "deterministic")
+    candidate = complete(db, attempt.id, status=CandidateStatus.REVIEW_REQUIRED)
+    stored = db.get_attempt_for_source(source.id)
+    assert stored.status is AttemptStatus.SUCCEEDED and stored.raw == RAW
+    assert candidate.attempt_id == attempt.id
+    assert candidate.initial_status is CandidateStatus.REVIEW_REQUIRED
+    assert db.get_candidate_for_attempt(attempt.id).id == candidate.id
+
+
+def test_completion_requires_the_attempt_to_still_be_started(db):
+    source, _ = db.get_or_create_source_document("f4" * 32, "a.pdf", 5)
+    attempt = db.create_attempt(source.id, "deterministic")
+    complete(db, attempt.id)
+    with pytest.raises(database_module.AttemptNotActive):
+        complete(db, attempt.id)
+    with pytest.raises(database_module.AttemptNotActive):
+        complete(db, "missing-attempt")
+    assert len(db.list_candidates()) == 1
+
+
+# ------------------------------------------- recovery of a succeeded attempt without candidate
+
+
+def strand_succeeded_attempt(db, sha):
+    """Reproduce the old crash window: a succeeded attempt (with evidence) but no candidate."""
+    source, _ = db.get_or_create_source_document(sha, "a.pdf", 5)
+    attempt = db.create_attempt(source.id, "deterministic")
+    with db.connect() as connection:
+        connection.execute(
+            "UPDATE extraction_attempts SET status = 'succeeded', raw_json = ?, "
+            "field_confidence_json = ?, conflicts_json = '[]', finished_at = ? WHERE id = ?",
+            (
+                json.dumps(RAW.to_json_dict()),
+                json.dumps(CONFIDENCE),
+                FIXED_NOW.isoformat(),
+                attempt.id,
+            ),
+        )
+    return source, attempt
+
+
+def attach(db, attempt_id, status=CandidateStatus.AUTO_READY):
+    normalized = normalize_invoice(RAW).fields
+    return db.attach_candidate_to_succeeded_attempt(
+        attempt_id,
+        original_normalized=normalized,
+        original_overall_confidence_bps=10000,
+        issues=[],
+        status=status,
+        logical_key=logical_duplicate_key(normalized),
+    )
+
+
+def test_recovery_rebuilds_the_candidate_from_the_stored_raw_evidence(db):
+    source, attempt = strand_succeeded_attempt(db, "f5" * 32)
+    assert db.get_candidate_for_attempt(attempt.id) is None
+    candidate = attach(db, attempt.id)
+    assert candidate.attempt_id == attempt.id
+    assert candidate.original_raw == RAW
+    assert candidate.original_field_confidence_bps == CONFIDENCE
+    assert candidate.initial_status is CandidateStatus.AUTO_READY
+    assert len(db.list_attempts_for_source(source.id)) == 1
+
+
+def test_recovery_is_idempotent(db):
+    _, attempt = strand_succeeded_attempt(db, "f6" * 32)
+    first = attach(db, attempt.id)
+    second = attach(db, attempt.id, status=CandidateStatus.REVIEW_REQUIRED)
+    assert second.id == first.id and second.initial_status is CandidateStatus.AUTO_READY
+    assert len(db.list_candidates()) == 1
+
+
+def test_recovery_refuses_an_attempt_that_did_not_succeed(db):
+    source, _ = db.get_or_create_source_document("f7" * 32, "a.pdf", 5)
+    started = db.create_attempt(source.id, "deterministic")
+    with pytest.raises(database_module.AttemptNotActive):
+        attach(db, started.id)
+    with pytest.raises(database_module.AttemptNotActive):
+        attach(db, "missing-attempt")
+
+
+# ------------------------------------------------ active attempts are never interrupted early
+
+
+def test_a_recent_started_attempt_blocks_retry_and_is_not_modified(db, clock):
+    source, _ = db.get_or_create_source_document("f8" * 32, "a.pdf", 5)
+    running = db.create_attempt(source.id, "deterministic")
+    clock.advance(seconds=STALE_ATTEMPT_AFTER.total_seconds() - 1)
+    with pytest.raises(database_module.AttemptInProgress):
+        db.retry_attempt(source.id, "deterministic")
+    attempts = db.list_attempts_for_source(source.id)
+    assert [(a.id, a.status, a.error_code) for a in attempts] == [
+        (running.id, AttemptStatus.STARTED, None)
+    ]
+    assert not db.is_attempt_stale(attempts[0])
+
+
+def test_the_stale_threshold_is_documented_and_boundary_inclusive(db, clock):
+    assert STALE_ATTEMPT_AFTER == timedelta(minutes=10)
+    source, _ = db.get_or_create_source_document("f9" * 32, "a.pdf", 5)
+    db.create_attempt(source.id, "deterministic")
+    clock.advance(minutes=10)
+    assert db.is_attempt_stale(db.get_attempt_for_source(source.id))
+    retry = db.retry_attempt(source.id, "deterministic")
+    assert retry.attempt_number == 2
+
+
+def test_the_stale_threshold_can_be_configured(db_path, clock):
+    short = Database(now_provider=clock, stale_attempt_after=timedelta(seconds=30))
+    short.initialize()
+    source, _ = short.get_or_create_source_document("fa" * 32, "a.pdf", 5)
+    short.create_attempt(source.id, "deterministic")
+    clock.advance(seconds=29)
+    with pytest.raises(database_module.AttemptInProgress):
+        short.retry_attempt(source.id, "deterministic")
+    clock.advance(seconds=1)
+    assert short.retry_attempt(source.id, "deterministic").attempt_number == 2

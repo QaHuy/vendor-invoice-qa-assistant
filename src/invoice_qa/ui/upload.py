@@ -21,6 +21,9 @@ def _show_result(result: IntakeResult) -> None:
     if result.outcome is IntakeOutcome.REJECTED:
         st.error(helpers.upload_rejection_message(result.rejection_code or ""))
         return
+    if result.outcome is IntakeOutcome.IN_PROGRESS:
+        st.info(helpers.extraction_in_progress_message())
+        return
     if result.content_duplicate:
         st.info("This exact file was uploaded before. Showing the existing result.")
     if result.outcome is IntakeOutcome.EXTRACTION_ERROR:

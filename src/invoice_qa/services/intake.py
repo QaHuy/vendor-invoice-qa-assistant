@@ -9,8 +9,13 @@ from pydantic import BaseModel, ConfigDict
 from invoice_qa.domain.models import (
     AttemptRecord,
     AttemptStatus,
+    CandidateStatus,
+    FieldConflict,
     InvoiceCandidate,
+    NormalizedInvoiceFields,
+    RawInvoiceFields,
     SourceDocumentRecord,
+    ValidationIssue,
 )
 from invoice_qa.domain.normalization import normalize_invoice
 from invoice_qa.domain.transitions import derive_candidate_status
@@ -20,7 +25,12 @@ from invoice_qa.domain.validation import (
     validate_invoice,
 )
 from invoice_qa.extraction.base import ExtractionResult, Extractor
-from invoice_qa.infrastructure.database import Database, RetryNotAllowed
+from invoice_qa.infrastructure.database import (
+    AttemptInProgress,
+    AttemptNotActive,
+    Database,
+    RetryNotAllowed,
+)
 from invoice_qa.infrastructure.file_security import (
     UploadRejected,
     safe_display_filename,
@@ -32,6 +42,7 @@ from invoice_qa.infrastructure.file_security import (
 class IntakeOutcome(StrEnum):
     REJECTED = "rejected"
     EXTRACTION_ERROR = "extraction_error"
+    IN_PROGRESS = "in_progress"
     CANDIDATE = "candidate"
 
 
@@ -46,6 +57,18 @@ class IntakeResult(BaseModel):
     source_document_id: str | None = None
     display_filename: str | None = None
     candidate: InvoiceCandidate | None = None
+
+
+class _Assessment(BaseModel):
+    """Everything a candidate needs, derived deterministically from stored raw evidence."""
+
+    model_config = ConfigDict(frozen=True)
+
+    normalized: NormalizedInvoiceFields
+    overall_bps: int
+    issues: list[ValidationIssue]
+    status: CandidateStatus
+    logical_key: str | None
 
 
 class IntakeService:
@@ -100,6 +123,8 @@ class IntakeService:
             attempt = self._db.retry_attempt(source.id, self._method)
         except RetryNotAllowed:
             return self._existing_result(source.id, source.display_filename)
+        except AttemptInProgress:
+            return self._in_progress_result(source.id, source.display_filename)
         return self._run_attempt(source, attempt, content)
 
     def _run_attempt(
@@ -120,39 +145,101 @@ class IntakeService:
                 display_filename=source.display_filename,
             )
 
-        self._db.finish_attempt_success(
-            attempt.id, extraction.raw, extraction.field_confidence_bps, extraction.conflicts
+        try:
+            assessment = self._assess(
+                extraction.raw, extraction.field_confidence_bps, extraction.conflicts
+            )
+            # One transaction: the attempt succeeds only together with its candidate.
+            candidate = self._db.complete_attempt_with_candidate(
+                attempt.id,
+                raw=extraction.raw,
+                field_confidence_bps=extraction.field_confidence_bps,
+                conflicts=extraction.conflicts,
+                original_normalized=assessment.normalized,
+                original_overall_confidence_bps=assessment.overall_bps,
+                issues=assessment.issues,
+                status=assessment.status,
+                logical_key=assessment.logical_key,
+            )
+        except AttemptNotActive:
+            # Another session already closed this attempt as interrupted.
+            return self._existing_result(source.id, source.display_filename)
+        except Exception:
+            # The transaction rolled back, so the attempt is still ``started``; record it as a
+            # failed attempt (generic code only) so the user can retry.
+            try:
+                self._db.finish_attempt_error(attempt.id, "candidate_creation_failed")
+            except Exception:
+                pass
+            return IntakeResult(
+                outcome=IntakeOutcome.EXTRACTION_ERROR,
+                error_code="candidate_creation_failed",
+                retryable=True,
+                source_document_id=source.id,
+                display_filename=source.display_filename,
+            )
+        return IntakeResult(
+            outcome=IntakeOutcome.CANDIDATE,
+            source_document_id=source.id,
+            display_filename=source.display_filename,
+            candidate=candidate,
         )
-        normalization = normalize_invoice(extraction.raw)
+
+    def _assess(
+        self,
+        raw: RawInvoiceFields,
+        field_confidence_bps: dict[str, int],
+        conflicts: list[FieldConflict],
+    ) -> _Assessment:
+        normalization = normalize_invoice(raw)
         key = logical_duplicate_key(normalization.fields)
         duplicates = self._db.find_logical_duplicates(key, exclude_candidate_id="")
-        _, overall = effective_confidence(extraction.field_confidence_bps, set(), set())
+        _, overall = effective_confidence(field_confidence_bps, set(), set())
         validation = validate_invoice(
             normalization,
-            extraction.field_confidence_bps,
-            extraction.conflicts,
+            field_confidence_bps,
+            conflicts,
             set(),
             set(),
             duplicates,
             set(),
             today=self._today(),
         )
-        candidate = self._db.create_candidate(
-            attempt_id=attempt.id,
-            original_raw=extraction.raw,
-            original_normalized=normalization.fields,
-            original_field_confidence_bps=extraction.field_confidence_bps,
-            original_overall_confidence_bps=overall,
-            conflicts=extraction.conflicts,
+        return _Assessment(
+            normalized=normalization.fields,
+            overall_bps=overall,
             issues=validation.issues,
             status=derive_candidate_status(validation),
             logical_key=key,
         )
+
+    def _recover_candidate(self, attempt: AttemptRecord) -> InvoiceCandidate | None:
+        """Rebuild the candidate of a succeeded attempt from its stored raw evidence.
+
+        Needs no PDF and runs no extractor. Returns ``None`` if the evidence is unusable.
+        """
+        if attempt.raw is None:
+            return None
+        try:
+            assessment = self._assess(attempt.raw, attempt.field_confidence_bps, attempt.conflicts)
+            return self._db.attach_candidate_to_succeeded_attempt(
+                attempt.id,
+                original_normalized=assessment.normalized,
+                original_overall_confidence_bps=assessment.overall_bps,
+                issues=assessment.issues,
+                status=assessment.status,
+                logical_key=assessment.logical_key,
+            )
+        except Exception:
+            return None
+
+    def _in_progress_result(self, source_id: str, display_filename: str) -> IntakeResult:
         return IntakeResult(
-            outcome=IntakeOutcome.CANDIDATE,
-            source_document_id=source.id,
-            display_filename=source.display_filename,
-            candidate=candidate,
+            outcome=IntakeOutcome.IN_PROGRESS,
+            error_code="attempt_in_progress",
+            content_duplicate=True,
+            source_document_id=source_id,
+            display_filename=display_filename,
         )
 
     def _existing_result(self, source_id: str, display_filename: str) -> IntakeResult:
@@ -164,8 +251,19 @@ class IntakeService:
         }
         if attempt is not None and attempt.status is AttemptStatus.SUCCEEDED:
             candidate = self._db.get_candidate_for_attempt(attempt.id)
+            if candidate is None:
+                candidate = self._recover_candidate(attempt)
             if candidate is not None:
                 return IntakeResult(outcome=IntakeOutcome.CANDIDATE, candidate=candidate, **base)
+            return IntakeResult(
+                outcome=IntakeOutcome.EXTRACTION_ERROR,
+                error_code="candidate_creation_failed",
+                retryable=True,
+                **base,
+            )
+        if attempt is not None and attempt.status is AttemptStatus.STARTED:
+            if not self._db.is_attempt_stale(attempt):
+                return self._in_progress_result(source_id, display_filename)
         if attempt is not None and attempt.status is AttemptStatus.ERROR:
             return IntakeResult(
                 outcome=IntakeOutcome.EXTRACTION_ERROR,
@@ -173,7 +271,7 @@ class IntakeService:
                 retryable=True,
                 **base,
             )
-        # A stranded ``started`` attempt (or a source that never started one) is reported as
+        # A stale ``started`` attempt (or a source that never started one) is reported as
         # interrupted; only an explicit ``retry_extraction`` starts another attempt.
         return IntakeResult(
             outcome=IntakeOutcome.EXTRACTION_ERROR,

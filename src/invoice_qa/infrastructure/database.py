@@ -9,7 +9,7 @@ import sqlite3
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -40,9 +40,23 @@ _OPEN_STATUSES = (
 
 SCHEMA_VERSION = 2
 
+# A ``started`` attempt younger than this may still be running in another session and is never
+# touched; one at least this old is treated as stranded (crashed or abandoned) and may be marked
+# ``extraction_interrupted``. A deterministic extraction of a size-capped PDF takes well under a
+# minute, so ten minutes is a deliberately conservative bound. Override per ``Database`` instance.
+STALE_ATTEMPT_AFTER = timedelta(minutes=10)
+
 
 class RetryNotAllowed(Exception):
     """A retry was requested for a source that cannot be retried (unknown or already succeeded)."""
+
+
+class AttemptInProgress(Exception):
+    """A recent ``started`` attempt exists; it may be running in another session."""
+
+
+class AttemptNotActive(Exception):
+    """The attempt is unknown or not in the state the operation requires."""
 
 
 def _attempts_table(name: str, *, if_not_exists: bool) -> str:
@@ -192,9 +206,11 @@ class Database:
         path: Path | str | None = None,
         *,
         now_provider: Callable[[], datetime] = _utc_now,
+        stale_attempt_after: timedelta = STALE_ATTEMPT_AFTER,
     ) -> None:
         self._path = Path(path) if path is not None else get_db_path()
         self._now = now_provider
+        self._stale_after = stale_attempt_after
 
     # ------------------------------------------------------------ connections
 
@@ -303,8 +319,10 @@ class Database:
     def retry_attempt(self, source_document_id: str, method: str) -> AttemptRecord:
         """Explicit retry: keep every earlier attempt and start the next one.
 
-        A stranded ``started`` attempt is preserved as an ``extraction_interrupted`` error.
-        Raises ``RetryNotAllowed`` for an unknown source or one that already succeeded.
+        Raises ``RetryNotAllowed`` for an unknown source or one that already succeeded, and
+        ``AttemptInProgress`` (changing nothing) while the latest ``started`` attempt is younger
+        than the stale threshold. Only a stale ``started`` attempt is preserved as an
+        ``extraction_interrupted`` error before the next attempt begins.
         """
         with self._transaction() as connection:
             known = connection.execute(
@@ -313,19 +331,28 @@ class Database:
             if known is None:
                 raise RetryNotAllowed("unknown_document")
             latest = connection.execute(
-                "SELECT id, status FROM extraction_attempts WHERE source_document_id = ? "
+                "SELECT * FROM extraction_attempts WHERE source_document_id = ? "
                 "ORDER BY attempt_number DESC LIMIT 1",
                 (source_document_id,),
             ).fetchone()
             if latest is not None and latest["status"] == AttemptStatus.SUCCEEDED.value:
                 raise RetryNotAllowed("already_succeeded")
             if latest is not None and latest["status"] == AttemptStatus.STARTED.value:
+                if not self.is_attempt_stale(_attempt_from_row(latest)):
+                    raise AttemptInProgress(latest["id"])
                 connection.execute(
                     "UPDATE extraction_attempts SET status = 'error', "
                     "error_code = 'extraction_interrupted', finished_at = ? WHERE id = ?",
                     (self._timestamp(), latest["id"]),
                 )
             return self._insert_attempt(connection, source_document_id, method)
+
+    def is_attempt_stale(self, attempt: AttemptRecord) -> bool:
+        """True only for a ``started`` attempt at least ``stale_attempt_after`` old."""
+        if attempt.status is not AttemptStatus.STARTED:
+            return False
+        started = datetime.fromisoformat(attempt.created_at)
+        return self._now() - started >= self._stale_after
 
     def _insert_attempt(
         self, connection: sqlite3.Connection, source_document_id: str, method: str
@@ -346,14 +373,31 @@ class Database:
         ).fetchone()
         return _attempt_from_row(row)
 
-    def finish_attempt_success(
+    def complete_attempt_with_candidate(
         self,
         attempt_id: str,
+        *,
         raw: RawInvoiceFields,
         field_confidence_bps: dict[str, int],
         conflicts: list[FieldConflict],
-    ) -> None:
+        original_normalized: NormalizedInvoiceFields,
+        original_overall_confidence_bps: int,
+        issues: list[ValidationIssue],
+        status: CandidateStatus,
+        logical_key: str | None,
+    ) -> InvoiceCandidate:
+        """Store the successful extraction and create its candidate in ONE transaction.
+
+        Raises ``AttemptNotActive`` unless the attempt is still ``started``. If the candidate
+        insert fails, the attempt stays ``started``: a succeeded attempt never exists without
+        its candidate.
+        """
         with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT status FROM extraction_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None or row["status"] != AttemptStatus.STARTED.value:
+                raise AttemptNotActive(attempt_id)
             connection.execute(
                 "UPDATE extraction_attempts SET status = 'succeeded', raw_json = ?, "
                 "field_confidence_json = ?, conflicts_json = ?, finished_at = ? WHERE id = ?",
@@ -364,6 +408,59 @@ class Database:
                     self._timestamp(),
                     attempt_id,
                 ),
+            )
+            return self._insert_candidate(
+                connection,
+                attempt_id=attempt_id,
+                original_raw=raw,
+                original_normalized=original_normalized,
+                original_field_confidence_bps=field_confidence_bps,
+                original_overall_confidence_bps=original_overall_confidence_bps,
+                conflicts=conflicts,
+                issues=issues,
+                status=status,
+                logical_key=logical_key,
+            )
+
+    def attach_candidate_to_succeeded_attempt(
+        self,
+        attempt_id: str,
+        *,
+        original_normalized: NormalizedInvoiceFields,
+        original_overall_confidence_bps: int,
+        issues: list[ValidationIssue],
+        status: CandidateStatus,
+        logical_key: str | None,
+    ) -> InvoiceCandidate:
+        """Recovery for a succeeded attempt that has no candidate (e.g. a pre-fix crash).
+
+        The candidate's original evidence is read from the attempt's stored raw extraction, never
+        from a new extraction. Idempotent: an existing candidate is returned unchanged. Raises
+        ``AttemptNotActive`` unless the attempt exists and succeeded.
+        """
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM extraction_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None or row["status"] != AttemptStatus.SUCCEEDED.value:
+                raise AttemptNotActive(attempt_id)
+            existing = connection.execute(
+                "SELECT * FROM candidates WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if existing is not None:
+                return _candidate_from_row(existing)
+            stored = _attempt_from_row(row)
+            return self._insert_candidate(
+                connection,
+                attempt_id=attempt_id,
+                original_raw=stored.raw,
+                original_normalized=original_normalized,
+                original_field_confidence_bps=stored.field_confidence_bps,
+                original_overall_confidence_bps=original_overall_confidence_bps,
+                conflicts=stored.conflicts,
+                issues=issues,
+                status=status,
+                logical_key=logical_key,
             )
 
     def finish_attempt_error(self, attempt_id: str, error_code: str) -> None:
@@ -395,8 +492,9 @@ class Database:
 
     # ------------------------------------------------------------- candidates
 
-    def create_candidate(
+    def _insert_candidate(
         self,
+        connection: sqlite3.Connection,
         *,
         attempt_id: str,
         original_raw: RawInvoiceFields,
@@ -412,36 +510,35 @@ class Database:
         now = self._timestamp()
         raw_json = _dumps(original_raw.to_json_dict())
         normalized_json = _dumps(original_normalized.to_json_dict())
-        with self._transaction() as connection:
-            connection.execute(
-                "INSERT INTO candidates (id, attempt_id, original_raw_json, "
-                "original_normalized_json, original_field_confidence_json, "
-                "original_conflicts_json, original_overall_confidence_bps, effective_raw_json, "
-                "effective_normalized_json, corrected_fields_json, confirmed_fields_json, "
-                "confirmed_distinct_ids_json, issues_json, logical_key, status, initial_status, "
-                "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', ?, ?, ?, ?, ?, ?)",
-                (
-                    candidate_id,
-                    attempt_id,
-                    raw_json,
-                    normalized_json,
-                    _dumps(original_field_confidence_bps),
-                    _dumps([c.model_dump() for c in conflicts]),
-                    original_overall_confidence_bps,
-                    raw_json,
-                    normalized_json,
-                    _dumps([i.model_dump(mode="json") for i in issues]),
-                    logical_key,
-                    status.value,
-                    status.value,
-                    now,
-                    now,
-                ),
-            )
-            row = connection.execute(
-                "SELECT * FROM candidates WHERE id = ?", (candidate_id,)
-            ).fetchone()
+        connection.execute(
+            "INSERT INTO candidates (id, attempt_id, original_raw_json, "
+            "original_normalized_json, original_field_confidence_json, "
+            "original_conflicts_json, original_overall_confidence_bps, effective_raw_json, "
+            "effective_normalized_json, corrected_fields_json, confirmed_fields_json, "
+            "confirmed_distinct_ids_json, issues_json, logical_key, status, initial_status, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', ?, ?, ?, ?, ?, ?)",
+            (
+                candidate_id,
+                attempt_id,
+                raw_json,
+                normalized_json,
+                _dumps(original_field_confidence_bps),
+                _dumps([c.model_dump() for c in conflicts]),
+                original_overall_confidence_bps,
+                raw_json,
+                normalized_json,
+                _dumps([i.model_dump(mode="json") for i in issues]),
+                logical_key,
+                status.value,
+                status.value,
+                now,
+                now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM candidates WHERE id = ?", (candidate_id,)
+        ).fetchone()
         return _candidate_from_row(row)
 
     def get_candidate(self, candidate_id: str) -> InvoiceCandidate | None:

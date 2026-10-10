@@ -6,9 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from invoice_qa.domain.models import CandidateStatus, IssueCode
+from conftest import TODAY
+from invoice_qa.domain.models import AttemptStatus, CandidateStatus, IssueCode
+from invoice_qa.extraction.deterministic import DeterministicExtractor
 from invoice_qa.infrastructure.file_security import sha256_bytes, validate_pdf_upload
-from invoice_qa.synthetic import fixture_pdf
+from invoice_qa.services.intake import IntakeOutcome, IntakeService
+from invoice_qa.synthetic import build_no_text_pdf, fixture_pdf
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "sample_data" / "manifest.json"
@@ -252,3 +255,57 @@ def test_reference_date_drives_the_future_date_scenario(evaluator, manifest, tmp
     scenarios = json.loads((tmp_path / "r.json").read_text(encoding="utf-8"))["scenarios"]
     future = next(s for s in scenarios if s["scenario"] == "future_invoice_date")
     assert future["actual"]["status"] == "auto_ready"
+
+
+# ------------------------------------------------------------- retry walkthrough sample
+
+
+def test_generator_writes_the_no_text_retry_sample_next_to_the_fixtures(generator, tmp_path):
+    digests = generator.generate(MANIFEST_PATH, tmp_path)
+    assert generator.RETRY_DEMO_ID in digests
+    assert (tmp_path / "retry-demo-no-text.pdf").is_file()
+    assert len(list(tmp_path.glob("*.pdf"))) == 14
+
+
+def test_no_text_retry_sample_is_reproducible_and_distinct(generator, manifest, tmp_path):
+    first = generator.generate(MANIFEST_PATH, tmp_path / "one")
+    second = generator.generate(MANIFEST_PATH, tmp_path / "two")
+    name = f"{generator.RETRY_DEMO_ID}.pdf"
+    assert (tmp_path / "one" / name).read_bytes() == (tmp_path / "two" / name).read_bytes()
+    assert first[generator.RETRY_DEMO_ID] == second[generator.RETRY_DEMO_ID]
+    assert first[generator.RETRY_DEMO_ID] == sha256_bytes(build_no_text_pdf())
+    fixture_digests = {first[f["id"]] for f in manifest["fixtures"]}
+    assert first[generator.RETRY_DEMO_ID] not in fixture_digests
+
+
+def test_no_text_retry_sample_is_a_valid_pdf_with_the_expected_extraction_error():
+    pdf = build_no_text_pdf()
+    assert validate_pdf_upload("retry-demo-no-text.pdf", pdf).page_count == 1
+    result = DeterministicExtractor().extract(pdf)
+    assert result.raw is None
+    assert result.error_code == "no_extractable_text"
+
+
+def test_no_text_retry_sample_drives_the_retry_flow(database):
+    service = IntakeService(database, DeterministicExtractor(), today_provider=lambda: TODAY)
+    pdf = build_no_text_pdf()
+    first = service.process_upload("retry-demo-no-text.pdf", pdf)
+    assert first.outcome is IntakeOutcome.EXTRACTION_ERROR and first.retryable
+    assert first.error_code == "no_extractable_text"
+    second = service.retry_extraction("retry-demo-no-text.pdf", pdf)
+    assert second.error_code == "no_extractable_text" and second.retryable
+    attempts = database.list_attempts_for_source(first.source_document_id)
+    assert [(a.attempt_number, a.status) for a in attempts] == [
+        (1, AttemptStatus.ERROR),
+        (2, AttemptStatus.ERROR),
+    ]
+
+
+def test_no_text_retry_sample_is_not_an_evaluation_fixture(manifest):
+    assert all("no-text" not in fixture["id"] for fixture in manifest["fixtures"])
+    assert len(manifest["fixtures"]) == 13
+
+
+def test_no_text_retry_sample_contains_no_personal_or_contact_text():
+    assert b"@" not in build_no_text_pdf()
+    assert b"http" not in build_no_text_pdf()

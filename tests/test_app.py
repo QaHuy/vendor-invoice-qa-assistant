@@ -5,7 +5,9 @@ from streamlit.testing.v1 import AppTest
 
 from factories import make_pdf, no_text_pdf
 from fakes import FlakyExtractor
-from invoice_qa.domain.models import CandidateStatus
+from invoice_qa.domain.models import AttemptStatus, CandidateStatus
+from invoice_qa.infrastructure.database import STALE_ATTEMPT_AFTER, Database
+from invoice_qa.infrastructure.file_security import sha256_bytes
 from invoice_qa.ui import helpers
 
 APP_PATH = str(Path(__file__).resolve().parents[1] / "app.py")
@@ -254,3 +256,42 @@ def test_metrics_page_separates_initial_review_rate_from_current_backlog_share(
     labels = {m.label: m.value for m in at.metric}
     assert labels["Initial review rate"] == "50%"
     assert labels["Current review backlog share"] == "0%"
+
+
+# --------------------------------------------------------- an active attempt is never interrupted
+
+
+def test_in_progress_message_is_generic():
+    message = helpers.extraction_in_progress_message().lower()
+    assert "already in progress" in message
+    assert "attempt_in_progress" not in message
+
+
+def test_upload_during_an_active_attempt_shows_a_generic_in_progress_message(
+    db_path, database, clock, monkeypatch
+):
+    monkeypatch.setattr(helpers, "Database", lambda: Database(now_provider=clock))
+    pdf = make_pdf()
+    source, _ = database.get_or_create_source_document(sha256_bytes(pdf), "a.pdf", len(pdf))
+    running = database.create_attempt(source.id, "deterministic")
+    at = upload(open_page("Upload"), "a.pdf", pdf)
+    assert not at.exception
+    assert any("already in progress" in i.value for i in at.info)
+    assert not [b for b in at.button if b.key == "retry_extraction"]
+    assert not at.error
+    attempts = database.list_attempts_for_source(source.id)
+    assert [(a.id, a.status) for a in attempts] == [(running.id, AttemptStatus.STARTED)]
+
+
+def test_a_stale_attempt_is_offered_a_retry_in_the_ui(db_path, database, clock, monkeypatch):
+    monkeypatch.setattr(helpers, "Database", lambda: Database(now_provider=clock))
+    pdf = make_pdf()
+    source, _ = database.get_or_create_source_document(sha256_bytes(pdf), "a.pdf", len(pdf))
+    database.create_attempt(source.id, "deterministic")
+    clock.advance(seconds=STALE_ATTEMPT_AFTER.total_seconds())
+    at = upload(open_page("Upload"), "a.pdf", pdf)
+    assert at.button(key="retry_extraction")
+    at.button(key="retry_extraction").click().run()
+    assert any("Status: auto_ready" in s.value for s in at.success)
+    codes = [a.error_code for a in database.list_attempts_for_source(source.id)]
+    assert codes == ["extraction_interrupted", None]

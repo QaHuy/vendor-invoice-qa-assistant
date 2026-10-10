@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -11,6 +11,24 @@ TODAY = date(2026, 10, 10)
 FIXED_NOW = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
 
 
+class MutableClock:
+    """Injected database clock: starts at FIXED_NOW and only moves when a test advances it."""
+
+    def __init__(self) -> None:
+        self.now = FIXED_NOW
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, **kwargs) -> None:
+        self.now += timedelta(**kwargs)
+
+
+@pytest.fixture
+def clock():
+    return MutableClock()
+
+
 @pytest.fixture
 def db_path(tmp_path, monkeypatch):
     """A throwaway SQLite path wired through the documented environment variable."""
@@ -20,8 +38,8 @@ def db_path(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def database(db_path):
-    instance = Database(now_provider=lambda: FIXED_NOW)
+def database(db_path, clock):
+    instance = Database(now_provider=clock)
     instance.initialize()
     return instance
 
