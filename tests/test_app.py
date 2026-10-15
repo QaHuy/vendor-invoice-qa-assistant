@@ -62,6 +62,36 @@ def test_upload_control_renders_for_pdf_input(db_path):
     assert uploaders[0].proto.max_upload_size_mb == 5
 
 
+@pytest.fixture
+def repo_cwd(monkeypatch):
+    """Sample invoices are read from sample_data/ relative to the working directory."""
+    monkeypatch.chdir(Path(APP_PATH).parent)
+
+
+def test_upload_page_offers_sample_invoices(db_path, repo_cwd):
+    at = open_page("Upload")
+    options = at.selectbox(key="sample_choice").options
+    assert options[0] == "Clean USD"
+    assert len(options) == 12
+
+
+def test_running_a_clean_sample_creates_an_auto_ready_candidate(db_path, repo_cwd):
+    at = open_page("Upload")
+    at.button(key="run_sample").click().run()
+    assert not at.exception
+    assert any("Status: auto_ready" in s.value for s in at.success)
+    assert "No candidates" not in page_text(open_page("Review Queue"))
+
+
+def test_running_a_review_sample_lists_its_issue(db_path, repo_cwd):
+    at = open_page("Upload")
+    at.selectbox(key="sample_choice").set_value("Arithmetic mismatch").run()
+    at.button(key="run_sample").click().run()
+    assert not at.exception
+    assert any("Status: review_required" in s.value for s in at.success)
+    assert "arithmetic_mismatch" in all_rendered(at)
+
+
 def seed(intake, overrides=None, extra=None, name="invoice.pdf"):
     return intake.process_upload(name, make_pdf(overrides, extra)).candidate
 

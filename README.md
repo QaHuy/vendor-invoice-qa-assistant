@@ -7,6 +7,10 @@ keeps append-only evidence, and exports approved data.
 > Synthetic data only. Not production software. No claim is made about real-world accuracy,
 > regulatory compliance, customer usage or time savings.
 
+**Live demo:** [vendor-invoice-app-assistant on Streamlit Community Cloud](https://vendor-invoice-app-assistant-v57uk8jynappqsh7qmdyvqu.streamlit.app/).
+No PDF needed: on the Upload page, pick a sample invoice and click **Run sample**. The hosted
+demo shares one database across visitors and starts empty again when the app restarts.
+
 ## 1. Overview
 
 Streamlit UI over plain-Python services, a domain layer with exact `Decimal`/date rules, and
