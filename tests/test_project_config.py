@@ -129,15 +129,17 @@ def test_runtime_dependencies_are_exactly_the_documented_set():
     }
 
 
-def test_streamlit_cloud_requirements_install_the_project():
+def test_streamlit_cloud_requirements_install_the_project_editable():
     # Streamlit Community Cloud reads pyproject.toml as Poetry only, so requirements.txt
     # must install this package (and through it the pyproject dependencies) instead.
+    # Editable, because Cloud copies new commits into the checkout without reinstalling;
+    # a regular install would keep serving the code from the first deploy.
     lines = [
         line.strip()
         for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
-    assert lines == ["."]
+    assert lines == ["-e ."]
 
 
 def test_reportlab_is_pinned_exactly():

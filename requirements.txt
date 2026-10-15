@@ -1,3 +1,5 @@
 # Streamlit Community Cloud reads this file (it treats pyproject.toml as Poetry only).
 # Installs the invoice_qa package from src/ together with the dependencies in pyproject.toml.
-.
+# Editable (-e) so new commits take effect: Cloud copies them into the checkout without
+# reinstalling, and a regular install would keep running the code from the first deploy.
+-e .
