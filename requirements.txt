@@ -1,0 +1,3 @@
+# Streamlit Community Cloud reads this file (it treats pyproject.toml as Poetry only).
+# Installs the invoice_qa package from src/ together with the dependencies in pyproject.toml.
+.

@@ -129,6 +129,17 @@ def test_runtime_dependencies_are_exactly_the_documented_set():
     }
 
 
+def test_streamlit_cloud_requirements_install_the_project():
+    # Streamlit Community Cloud reads pyproject.toml as Poetry only, so requirements.txt
+    # must install this package (and through it the pyproject dependencies) instead.
+    lines = [
+        line.strip()
+        for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert lines == ["."]
+
+
 def test_reportlab_is_pinned_exactly():
     dependencies = _pyproject()["project"]["dependencies"]
     reportlab = [d for d in dependencies if d.lower().startswith("reportlab")]
